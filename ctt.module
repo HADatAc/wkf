@@ -1,0 +1,33 @@
+<?php
+
+/**
+ * @file
+ * CTT Workflow Editor module file.
+ */
+
+/**
+ * Implements hook_theme().
+ */
+function ctt_theme() {
+  return [
+    'ctt_editor' => [
+      'variables' => [
+        'process_uri' => NULL,
+        'api_settings' => [],
+      ],
+    ],
+  ];
+}
+
+/**
+ * Implements hook_install().
+ */
+function ctt_install() {
+  // Grant permissions to administrator role by default.
+  $role = \Drupal\user\Entity\Role::load('administrator');
+  if ($role) {
+    $role->grantPermission('access ctt editor');
+    $role->grantPermission('administer ctt');
+    $role->save();
+  }
+}

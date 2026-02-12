@@ -1,0 +1,3 @@
+hasco_api_url: 'http://localhost:9000'
+jwt_key_id: ''
+disable_ssl_verification: false

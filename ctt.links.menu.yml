@@ -1,0 +1,11 @@
+ctt.editor:
+  title: 'CTT Workflow Editor'
+  route_name: ctt.editor
+  parent: system.admin_structure
+  weight: 10
+
+ctt.settings:
+  title: 'CTT Editor Settings'
+  route_name: ctt.settings
+  parent: system.admin_config_system
+  weight: 20

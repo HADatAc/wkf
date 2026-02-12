@@ -1,0 +1,9 @@
+name: CTT Workflow Editor
+type: module
+description: 'Embeds the CTT (ConcurTaskTree) visual workflow editor as a React application within Drupal. Provides API proxy routes between the editor and hascoapi.'
+package: HASCO
+core_version_requirement: ^10
+dependencies:
+  - drupal:rep
+  - drupal:key
+  - drupal:user

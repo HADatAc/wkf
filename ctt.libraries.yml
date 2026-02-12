@@ -1,0 +1,23 @@
+# CTT React Editor — main library bundle
+ctt-editor-app:
+  version: 1.x
+  css:
+    theme:
+      /modules/custom/ctt/dist/workflow-editor.css: {}
+  js:
+    /modules/custom/ctt/dist/hasco-workflow-editor.umd.js: { minified: true }
+  dependencies:
+    - core/drupal
+    - core/drupalSettings
+    - core/once
+
+# CTT Editor init — Drupal behavior that bootstraps the React app
+ctt-editor-init:
+  version: 1.x
+  js:
+    js/ctt-init.js: {}
+  dependencies:
+    - ctt/ctt-editor-app
+    - core/drupal
+    - core/drupalSettings
+    - core/once

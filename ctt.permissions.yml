@@ -1,0 +1,6 @@
+access ctt editor:
+  title: 'Access CTT Workflow Editor'
+  description: 'Use the visual workflow editor to create and manage CTT processes.'
+administer ctt:
+  title: 'Administer CTT Editor'
+  description: 'Configure CTT editor settings, API connection, and manage editor preferences.'

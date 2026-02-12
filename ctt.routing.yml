@@ -1,0 +1,165 @@
+# ==========================================
+# CTT Workflow Editor — Routes
+# ==========================================
+
+# --- Editor page (renders the React app) ---
+ctt.editor:
+  path: '/ctt/editor'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttEditorController::editorPage'
+    _title: 'CTT Workflow Editor'
+  requirements:
+    _permission: 'access ctt editor'
+
+# Load editor with a specific process URI
+ctt.editor_process:
+  path: '/ctt/editor/{process_uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttEditorController::editorPage'
+    _title: 'CTT Workflow Editor'
+  requirements:
+    _permission: 'access ctt editor'
+
+# --- Settings form ---
+ctt.settings:
+  path: '/admin/config/ctt/settings'
+  defaults:
+    _form: '\Drupal\ctt\Form\CttSettingsForm'
+    _title: 'CTT Editor Settings'
+  requirements:
+    _permission: 'administer ctt'
+
+# --- API proxy routes (frontend → Drupal → hascoapi) ---
+
+# Process CRUD
+ctt.api.process.list:
+  path: '/workflow/api/process/list'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::listProcesses'
+  requirements:
+    _permission: 'access ctt editor'
+  options:
+    no_cache: TRUE
+
+ctt.api.process.get:
+  path: '/workflow/api/process/{uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcess'
+  requirements:
+    _permission: 'access ctt editor'
+
+ctt.api.process.create:
+  path: '/workflow/api/process/create'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::createProcess'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [POST]
+
+ctt.api.process.delete:
+  path: '/workflow/api/process/delete/{uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::deleteProcess'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [DELETE]
+
+ctt.api.process.tree:
+  path: '/workflow/api/process/tree/{uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcessTree'
+  requirements:
+    _permission: 'access ctt editor'
+
+# Task CRUD
+ctt.api.task.list:
+  path: '/workflow/api/task/list'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::listTasks'
+  requirements:
+    _permission: 'access ctt editor'
+  options:
+    no_cache: TRUE
+
+ctt.api.task.get:
+  path: '/workflow/api/task/{uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getTask'
+  requirements:
+    _permission: 'access ctt editor'
+
+ctt.api.task.create:
+  path: '/workflow/api/task/create'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::createTask'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [POST]
+
+ctt.api.task.delete:
+  path: '/workflow/api/task/delete/{uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::deleteTask'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [DELETE]
+
+# Instrument routes
+ctt.api.instrument.list:
+  path: '/workflow/api/instrument/list'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::listInstruments'
+  requirements:
+    _permission: 'access ctt editor'
+  options:
+    no_cache: TRUE
+
+ctt.api.instrument.get:
+  path: '/workflow/api/instrument/{uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getInstrument'
+  requirements:
+    _permission: 'access ctt editor'
+
+ctt.api.instrument.components:
+  path: '/workflow/api/instrument/{uri}/components'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentComponents'
+  requirements:
+    _permission: 'access ctt editor'
+
+# Instrument search autocomplete
+ctt.api.instrument.search:
+  path: '/workflow/api/instrument/search'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::searchInstruments'
+  requirements:
+    _permission: 'access ctt editor'
+
+# URI generation helper
+ctt.api.uri.generate:
+  path: '/workflow/api/uri/generate/{element_type}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::generateUri'
+  requirements:
+    _permission: 'access ctt editor'
+
+# Namespace (repo info)
+ctt.api.repo:
+  path: '/workflow/api/repo'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getRepoInfo'
+  requirements:
+    _permission: 'access ctt editor'
+
+# --- Standalone authentication (CTT dev server → Drupal) ---
+# Validates credentials against Drupal's user DB and returns user identity.
+ctt.auth.login:
+  path: '/workflow/auth/login'
+  defaults:
+    _controller: 'ctt.auth_controller:login'
+  requirements:
+    _access: 'TRUE'
+  methods: [POST]
+  options:
+    no_cache: TRUE

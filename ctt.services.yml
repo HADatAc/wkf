@@ -1,0 +1,17 @@
+services:
+  ctt.hasco_client:
+    class: Drupal\ctt\Service\CttHascoClient
+    arguments:
+      - '@http_client'
+      - '@config.factory'
+      - '@key.repository'
+      - '@logger.factory'
+
+  ctt.auth_controller:
+    class: Drupal\ctt\Controller\CttAuthController
+    public: true
+    arguments:
+      - '@user.auth'
+      - '@entity_type.manager'
+    tags:
+      - { name: controller.service_arguments }
