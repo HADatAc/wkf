@@ -157,7 +157,7 @@ ctt.api.repo:
 ctt.auth.login:
   path: '/workflow/auth/login'
   defaults:
-    _controller: 'ctt.auth_controller:login'
+    _controller: '\Drupal\ctt\Controller\CttAuthController::login'
   requirements:
     _access: 'TRUE'
   methods: [POST]
