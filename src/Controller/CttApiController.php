@@ -283,4 +283,31 @@ class CttApiController extends ControllerBase {
     }
   }
 
+  /**
+   * Proxy arbitrary hascoapi calls from frontend through Drupal (same-origin).
+   */
+  public function proxyHasco($proxy_path, Request $request) {
+    $endpoint = '/hascoapi/api/' . ltrim(rawurldecode($proxy_path), '/');
+    $options = [];
+
+    $query = $request->query->all();
+    if (!empty($query)) {
+      $options['query'] = $query;
+    }
+
+    $rawBody = $request->getContent();
+    if ($rawBody !== '') {
+      $decoded = json_decode($rawBody, TRUE);
+      $options['json'] = $decoded !== NULL ? $decoded : $rawBody;
+    }
+
+    try {
+      $result = $this->hascoClient->proxyRequest($request->getMethod(), $endpoint, $options);
+      return new JsonResponse($result);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage(), 'endpoint' => $endpoint], 500);
+    }
+  }
+
 }

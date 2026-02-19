@@ -152,6 +152,18 @@ ctt.api.repo:
   requirements:
     _permission: 'access ctt editor'
 
+# Generic hascoapi proxy (same-origin) for any direct frontend calls.
+ctt.api.hasco_proxy:
+  path: '/workflow/hascoapi/api/{proxy_path}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::proxyHasco'
+  requirements:
+    _permission: 'access ctt editor'
+    proxy_path: '.+'
+  methods: [GET, POST, PUT, PATCH, DELETE]
+  options:
+    no_cache: TRUE
+
 # --- Standalone authentication (CTT dev server → Drupal) ---
 # Validates credentials against Drupal's user DB and returns user identity.
 ctt.auth.login:

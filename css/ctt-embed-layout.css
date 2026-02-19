@@ -1,0 +1,49 @@
+/* Fullscreen/no-margin layout only for CTT editor pages. */
+
+.path-ctt-editor .page-title,
+.path-ctt-editor-process .page-title {
+  display: none !important;
+}
+
+.path-ctt-editor main .container,
+.path-ctt-editor-process main .container,
+.path-ctt-editor .main-content .container,
+.path-ctt-editor-process .main-content .container,
+.path-ctt-editor #block-hasco-barrio-content,
+.path-ctt-editor-process #block-hasco-barrio-content,
+.path-ctt-editor article,
+.path-ctt-editor-process article {
+  max-width: 100% !important;
+  width: 100% !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+.path-ctt-editor #ctt-workflow-app,
+.path-ctt-editor-process #ctt-workflow-app {
+  position: relative;
+  width: 100%;
+  min-height: calc(100vh - var(--drupal-displace-offset-top, 0px) - 8px);
+  height: calc(100vh - var(--drupal-displace-offset-top, 0px) - 8px);
+}
+
+.path-ctt-editor .ctt-loading-indicator,
+.path-ctt-editor-process .ctt-loading-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.path-ctt-editor .ctt-loading-content,
+.path-ctt-editor-process .ctt-loading-content {
+  text-align: center;
+}
+
+.path-ctt-editor .ctt-loading-text,
+.path-ctt-editor-process .ctt-loading-text {
+  margin-top: 1rem;
+  color: #666;
+}

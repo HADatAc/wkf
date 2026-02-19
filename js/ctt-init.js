@@ -12,8 +12,17 @@
     attach: function (context) {
       once('ctt-editor-init', '#ctt-workflow-app', context).forEach(function (container) {
         var settings = drupalSettings.ctt || {};
+        settings.hascoApiUrl = '/workflow';
+        drupalSettings.ctt = drupalSettings.ctt || {};
+        drupalSettings.ctt.hascoApiUrl = '/workflow';
         var maxAttempts = 50;
         var attempt = 0;
+
+        // Force full usable viewport for embedded mode.
+        container.style.width = '100%';
+        container.style.maxWidth = '100%';
+        container.style.minHeight = 'calc(100vh - 150px)';
+        container.style.height = 'calc(100vh - 150px)';
 
         /**
          * Wait for the UMD bundle to expose the global HASCOWorkflowEditor.
@@ -41,6 +50,9 @@
     // Remove loading indicator
     container.innerHTML = '';
 
+    // Ensure React root wrapper also fills the editor area.
+    container.style.overflow = 'hidden';
+
     // Build configuration from drupalSettings
     var config = {
       apiBaseUrl: settings.apiBaseUrl || '/workflow/api',
@@ -60,23 +72,17 @@
       console.log('[CTT Editor] Drupal mode detected. Config:', config);
     }
 
-    // React 18+ createRoot API
-    if (window.React && window.ReactDOM && window.ReactDOM.createRoot) {
-      var root = window.ReactDOM.createRoot(container);
-      var EditorComponent = window.HASCOWorkflowEditor.WorkflowEditor;
-
-      root.render(
-        window.React.createElement(EditorComponent, {
-          apiClient: null, // Will auto-detect Drupal and use DrupalAdapter
-          collaboration: {
-            enabled: false
-          }
-        })
-      );
+    if (window.HASCOWorkflowEditor && typeof window.HASCOWorkflowEditor.mountWorkflowEditor === 'function') {
+      window.HASCOWorkflowEditor.mountWorkflowEditor(container, {
+        apiClient: null,
+        processUri: settings.processUri || null,
+        collaboration: {
+          enabled: false,
+        },
+      });
     } else {
-      // Fallback: the UMD bundle should have its own React bundled
       container.innerHTML = '<p style="color:orange;">CTT Editor loaded. Initializing…</p>';
-      console.warn('[CTT Editor] React/ReactDOM not found globally. The UMD bundle should include them.');
+      console.warn('[CTT Editor] mountWorkflowEditor not found in UMD bundle.');
     }
   }
 

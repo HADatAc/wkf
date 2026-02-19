@@ -5,6 +5,7 @@ ctt-editor-app:
     theme:
       /modules/custom/ctt/dist/workflow-editor.css: {}
   js:
+    js/process-polyfill.js: {}
     /modules/custom/ctt/dist/hasco-workflow-editor.umd.js: { minified: true }
   dependencies:
     - core/drupal
@@ -14,6 +15,9 @@ ctt-editor-app:
 # CTT Editor init — Drupal behavior that bootstraps the React app
 ctt-editor-init:
   version: 1.x
+  css:
+    theme:
+      css/ctt-embed-layout.css: {}
   js:
     js/ctt-init.js: {}
   dependencies:

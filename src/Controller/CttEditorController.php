@@ -74,7 +74,8 @@ class CttEditorController extends ControllerBase {
     // Build drupalSettings for the React app.
     $drupal_settings = [
       'apiBaseUrl' => '/workflow/api',
-      'hascoApiUrl' => $hasco_api_url,
+      // Force same-origin proxy in embedded mode to avoid browser CORS.
+      'hascoApiUrl' => '/workflow',
       'defaultNamespaceUrl' => $default_namespace_url,
       'csrfToken' => $csrf_token,
       'processUri' => $process_uri ? rawurldecode($process_uri) : NULL,
@@ -93,6 +94,7 @@ class CttEditorController extends ControllerBase {
 
     return [
       '#theme' => 'ctt_editor',
+      '#title' => '',
       '#process_uri' => $process_uri,
       '#api_settings' => $drupal_settings,
       '#attached' => [

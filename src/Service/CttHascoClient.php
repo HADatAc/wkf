@@ -140,6 +140,13 @@ class CttHascoClient {
     }
   }
 
+  /**
+   * Generic passthrough request for controller-level proxy routes.
+   */
+  public function proxyRequest(string $method, string $endpoint, array $options = []): array {
+    return $this->request($method, $endpoint, $options);
+  }
+
   // ================================================================
   // Generic operations
   // ================================================================
