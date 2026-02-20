@@ -153,16 +153,29 @@ class CttHascoClient {
 
   /**
    * Fetch any element by URI.
+   *
+   * The hascoapi response is wrapped in { isSuccessful, body }.
+   * We unwrap and return just the body (the entity data).
    */
   public function getByUri(string $uri): array {
     $endpoint = '/hascoapi/api/uri/' . rawurlencode($uri);
-    return $this->request('GET', $endpoint);
+    $response = $this->request('GET', $endpoint);
+    return $response['body'] ?? $response;
   }
 
   /**
    * Create an element of the given type.
    */
   public function createElement(string $element_type, array $data): array {
+    if (strtolower($element_type) === 'process') {
+      if (!empty($data['managerEmail']) && empty($data['hasSIRManagerEmail'])) {
+        $data['hasSIRManagerEmail'] = $data['managerEmail'];
+      }
+      if (isset($data['managerEmail'])) {
+        unset($data['managerEmail']);
+      }
+    }
+
     $json = json_encode($data);
     $endpoint = '/hascoapi/api/' . $element_type . '/create/' . rawurlencode($json);
     return $this->request('POST', $endpoint);
@@ -324,6 +337,17 @@ class CttHascoClient {
    */
   public function getRepoInfo(): array {
     return $this->request('GET', '/hascoapi/api/repo');
+  }
+
+  /**
+   * Get available repository languages.
+   */
+  public function getRepoLanguages(): array {
+    $result = $this->request('GET', '/hascoapi/api/repo/table/languages');
+    if (isset($result['body']) && is_array($result['body'])) {
+      return $result['body'];
+    }
+    return $result;
   }
 
   /**

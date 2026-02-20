@@ -71,11 +71,18 @@ class CttEditorController extends ControllerBase {
     // Get CSRF token for API calls.
     $csrf_token = \Drupal::csrfToken()->get('rest');
 
+    $base_path = rtrim(
+      \Drupal::request()->getBasePath() ?: '/',
+      '/'
+    );
+    $drupal_base_url = ($base_path === '' ? '/' : $base_path . '/');
+
     // Build drupalSettings for the React app.
     $drupal_settings = [
-      'apiBaseUrl' => '/workflow/api',
+      'drupalBaseUrl' => $drupal_base_url,
+      'apiBaseUrl' => $drupal_base_url . 'workflow/api',
       // Force same-origin proxy in embedded mode to avoid browser CORS.
-      'hascoApiUrl' => '/workflow',
+      'hascoApiUrl' => $drupal_base_url . 'workflow',
       'defaultNamespaceUrl' => $default_namespace_url,
       'csrfToken' => $csrf_token,
       'processUri' => $process_uri ? rawurldecode($process_uri) : NULL,

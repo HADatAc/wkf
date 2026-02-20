@@ -42,7 +42,7 @@ ctt.api.process.list:
     no_cache: TRUE
 
 ctt.api.process.get:
-  path: '/workflow/api/process/{uri}'
+  path: '/workflow/api/process/get'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getProcess'
   requirements:
@@ -57,7 +57,7 @@ ctt.api.process.create:
   methods: [POST]
 
 ctt.api.process.delete:
-  path: '/workflow/api/process/delete/{uri}'
+  path: '/workflow/api/process/delete'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::deleteProcess'
   requirements:
@@ -65,7 +65,7 @@ ctt.api.process.delete:
   methods: [DELETE]
 
 ctt.api.process.tree:
-  path: '/workflow/api/process/tree/{uri}'
+  path: '/workflow/api/process/tree'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getProcessTree'
   requirements:
@@ -82,7 +82,7 @@ ctt.api.task.list:
     no_cache: TRUE
 
 ctt.api.task.get:
-  path: '/workflow/api/task/{uri}'
+  path: '/workflow/api/task/get'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getTask'
   requirements:
@@ -97,7 +97,7 @@ ctt.api.task.create:
   methods: [POST]
 
 ctt.api.task.delete:
-  path: '/workflow/api/task/delete/{uri}'
+  path: '/workflow/api/task/delete'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::deleteTask'
   requirements:
@@ -115,14 +115,14 @@ ctt.api.instrument.list:
     no_cache: TRUE
 
 ctt.api.instrument.get:
-  path: '/workflow/api/instrument/{uri}'
+  path: '/workflow/api/instrument/get'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getInstrument'
   requirements:
     _permission: 'access ctt editor'
 
 ctt.api.instrument.components:
-  path: '/workflow/api/instrument/{uri}/components'
+  path: '/workflow/api/instrument/components'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentComponents'
   requirements:
@@ -149,6 +149,13 @@ ctt.api.repo:
   path: '/workflow/api/repo'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getRepoInfo'
+  requirements:
+    _permission: 'access ctt editor'
+
+ctt.api.repo.languages:
+  path: '/workflow/api/repo/languages'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getRepoLanguages'
   requirements:
     _permission: 'access ctt editor'
 

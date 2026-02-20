@@ -54,11 +54,12 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * GET /workflow/api/process/{uri}
+   * GET /workflow/api/process/get?uri=...
    */
-  public function getProcess($uri) {
+  public function getProcess(Request $request) {
     try {
-      $result = $this->hascoClient->getByUri(rawurldecode($uri));
+      $uri = $request->query->get('uri', '');
+      $result = $this->hascoClient->getByUri($uri);
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
@@ -75,11 +76,16 @@ class CttApiController extends ControllerBase {
       return new JsonResponse(['error' => 'Invalid JSON body'], 400);
     }
 
-    // Inject the current user's email as managerEmail.
+    // Ensure process payload uses HASCO-compatible manager field.
     $account = $this->currentUser();
     $user = \Drupal\user\Entity\User::load($account->id());
-    if ($user) {
-      $data['managerEmail'] = $user->getEmail();
+    if ($user && empty($data['hasSIRManagerEmail'])) {
+      $data['hasSIRManagerEmail'] = $user->getEmail();
+    }
+
+    // HASCO Process POJO does not accept managerEmail.
+    if (isset($data['managerEmail'])) {
+      unset($data['managerEmail']);
     }
 
     try {
@@ -92,11 +98,12 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * DELETE /workflow/api/process/delete/{uri}
+   * DELETE /workflow/api/process/delete?uri=...
    */
-  public function deleteProcess($uri) {
+  public function deleteProcess(Request $request) {
     try {
-      $this->hascoClient->deleteElement('process', rawurldecode($uri));
+      $uri = $request->query->get('uri', '');
+      $this->hascoClient->deleteElement('process', $uri);
       return new JsonResponse(['status' => 'deleted']);
     }
     catch (\Exception $e) {
@@ -105,13 +112,13 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * GET /workflow/api/process/tree/{uri}
+   * GET /workflow/api/process/tree?uri=...
    */
-  public function getProcessTree($uri) {
+  public function getProcessTree(Request $request) {
     try {
-      $decodedUri = rawurldecode($uri);
-      $process = $this->hascoClient->getByUri($decodedUri);
-      $tasks = $this->hascoClient->getTasksByProcess($decodedUri);
+      $uri = $request->query->get('uri', '');
+      $process = $this->hascoClient->getByUri($uri);
+      $tasks = $this->hascoClient->getTasksByProcess($uri);
       return new JsonResponse([
         'process' => $process,
         'tasks' => $tasks,
@@ -149,11 +156,12 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * GET /workflow/api/task/{uri}
+   * GET /workflow/api/task/get?uri=...
    */
-  public function getTask($uri) {
+  public function getTask(Request $request) {
     try {
-      $result = $this->hascoClient->getByUri(rawurldecode($uri));
+      $uri = $request->query->get('uri', '');
+      $result = $this->hascoClient->getByUri($uri);
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
@@ -180,11 +188,12 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * DELETE /workflow/api/task/delete/{uri}
+   * DELETE /workflow/api/task/delete?uri=...
    */
-  public function deleteTask($uri) {
+  public function deleteTask(Request $request) {
     try {
-      $this->hascoClient->deleteElement('task', rawurldecode($uri));
+      $uri = $request->query->get('uri', '');
+      $this->hascoClient->deleteElement('task', $uri);
       return new JsonResponse(['status' => 'deleted']);
     }
     catch (\Exception $e) {
@@ -213,11 +222,12 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * GET /workflow/api/instrument/{uri}
+   * GET /workflow/api/instrument/get?uri=...
    */
-  public function getInstrument($uri) {
+  public function getInstrument(Request $request) {
     try {
-      $result = $this->hascoClient->getByUri(rawurldecode($uri));
+      $uri = $request->query->get('uri', '');
+      $result = $this->hascoClient->getByUri($uri);
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
@@ -226,11 +236,12 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * GET /workflow/api/instrument/{uri}/components
+   * GET /workflow/api/instrument/components?uri=...
    */
-  public function getInstrumentComponents($uri) {
+  public function getInstrumentComponents(Request $request) {
     try {
-      $result = $this->hascoClient->getInstrumentComponents(rawurldecode($uri));
+      $uri = $request->query->get('uri', '');
+      $result = $this->hascoClient->getInstrumentComponents($uri);
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
@@ -276,6 +287,20 @@ class CttApiController extends ControllerBase {
   public function getRepoInfo() {
     try {
       $result = $this->hascoClient->getRepoInfo();
+      return new JsonResponse($result);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
+  /**
+   * GET /workflow/api/repo/languages
+   * Returns repository language table.
+   */
+  public function getRepoLanguages() {
+    try {
+      $result = $this->hascoClient->getRepoLanguages();
       return new JsonResponse($result);
     }
     catch (\Exception $e) {

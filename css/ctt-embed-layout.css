@@ -1,5 +1,22 @@
 /* Fullscreen/no-margin layout only for CTT editor pages. */
 
+html body.path-ctt-editor,
+html body.path-ctt-editor-process {
+  margin: 0 !important;
+  overflow: hidden !important;
+}
+
+body.path-ctt-editor,
+body.path-ctt-editor-process,
+body.path-ctt-editor #page-wrapper,
+body.path-ctt-editor-process #page-wrapper,
+body.path-ctt-editor #main-wrapper,
+body.path-ctt-editor-process #main-wrapper,
+body.path-ctt-editor main,
+body.path-ctt-editor-process main {
+  height: 100%;
+}
+
 .path-ctt-editor .page-title,
 .path-ctt-editor-process .page-title {
   display: none !important;
@@ -25,8 +42,9 @@
 .path-ctt-editor-process #ctt-workflow-app {
   position: relative;
   width: 100%;
-  min-height: calc(100vh - var(--drupal-displace-offset-top, 0px) - 8px);
-  height: calc(100vh - var(--drupal-displace-offset-top, 0px) - 8px);
+  min-height: calc(100dvh - var(--drupal-displace-offset-top, 0px));
+  height: calc(100dvh - var(--drupal-displace-offset-top, 0px));
+  overflow: hidden;
 }
 
 .path-ctt-editor .ctt-loading-indicator,
