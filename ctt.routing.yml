@@ -104,6 +104,17 @@ ctt.api.task.delete:
     _permission: 'access ctt editor'
   methods: [DELETE]
 
+# Assign required instruments to a task (query param to avoid encoded-slash routing issues).
+ctt.api.task.instruments_query:
+  path: '/workflow/api/task/instruments'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::setTaskRequiredInstrumentsQuery'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
+
 # Instrument routes
 ctt.api.instrument.list:
   path: '/workflow/api/instrument/list'
@@ -127,6 +138,24 @@ ctt.api.instrument.components:
     _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentComponents'
   requirements:
     _permission: 'access ctt editor'
+
+# Prefer query param for URIs to avoid encoded-slash routing issues on Apache.
+ctt.api.instrument.containerslots_query:
+  path: '/workflow/api/instrument/containerslots'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentContainerSlotsQuery'
+  requirements:
+    _permission: 'access ctt editor'
+  options:
+    no_cache: TRUE
+
+ctt.api.instrument.containerslots:
+  path: '/workflow/api/instrument/{instrument_uri}/containerslots'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentContainerSlots'
+  requirements:
+    _permission: 'access ctt editor'
+    instrument_uri: '.+'
 
 # Instrument search autocomplete
 ctt.api.instrument.search:

@@ -201,6 +201,100 @@ class CttApiController extends ControllerBase {
     }
   }
 
+  /**
+   * PUT /workflow/api/task/instruments?uri=...
+   *
+   * Query-param version to avoid encoded-slash routing issues under Apache.
+   * Accepts the frontend payload { instruments: [{ instrumentUri, componentUris: string[] }] }
+   * and maps it to hascoapi's expected structure.
+   */
+  public function setTaskRequiredInstrumentsQuery(Request $request) {
+    try {
+      $task_uri = $request->query->get('uri', '');
+      if ($task_uri === '') {
+        $uri_b64 = $request->query->get('uri_b64', '');
+        if ($uri_b64 !== '') {
+          // Base64url decode with optional padding.
+          $b64 = strtr($uri_b64, '-_', '+/');
+          $pad = strlen($b64) % 4;
+          if ($pad) {
+            $b64 .= str_repeat('=', 4 - $pad);
+          }
+          $decoded = base64_decode($b64, TRUE);
+          if ($decoded !== FALSE) {
+            $task_uri = $decoded;
+          }
+        }
+      }
+
+      if ($task_uri === '') {
+        return new JsonResponse(['error' => 'Missing parameter: uri'], 400);
+      }
+
+      $data = json_decode($request->getContent(), TRUE);
+      if (!is_array($data)) {
+        return new JsonResponse(['error' => 'Invalid JSON body'], 400);
+      }
+
+      $instruments = $data['instruments'] ?? [];
+      if (!is_array($instruments)) {
+        $instruments = [];
+      }
+
+      $instruments_input_count = count($instruments);
+
+      // Map to hascoapi payload shape.
+      $required_instrument = [];
+      foreach ($instruments as $inst) {
+        if (!is_array($inst)) {
+          continue;
+        }
+        $instrument_uri = trim((string) ($inst['instrumentUri'] ?? ''));
+        if ($instrument_uri === '') {
+          continue;
+        }
+
+        $entry = [
+          'instrumentUri' => $instrument_uri,
+        ];
+
+        $component_uris = $inst['componentUris'] ?? [];
+        if (is_string($component_uris)) {
+          $component_uris = [$component_uris];
+        }
+        if (is_array($component_uris) && count($component_uris) > 0) {
+          $required_components = [];
+          foreach ($component_uris as $comp_uri) {
+            $comp_uri = trim((string) $comp_uri);
+            if ($comp_uri === '') {
+              continue;
+            }
+            $required_components[] = [
+              'componentUri' => $comp_uri,
+              // containerSlotUri is optional in hascoapi.
+              'containerSlotUri' => '',
+            ];
+          }
+          if (count($required_components) > 0) {
+            $entry['requiredComponents'] = $required_components;
+          }
+        }
+
+        $required_instrument[] = $entry;
+      }
+
+      if ($instruments_input_count > 0 && count($required_instrument) === 0) {
+        return new JsonResponse(['error' => 'Invalid instruments payload'], 400);
+      }
+
+      $result = $this->hascoClient->setTaskRequiredInstruments($task_uri, $required_instrument);
+      return new JsonResponse($result);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
   // ================================================================
   // Instrument endpoints
   // ================================================================
@@ -242,6 +336,53 @@ class CttApiController extends ControllerBase {
     try {
       $uri = $request->query->get('uri', '');
       $result = $this->hascoClient->getInstrumentComponents($uri);
+      return new JsonResponse($result);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
+  /**
+   * GET /workflow/api/instrument/containerslots?uri=...
+   */
+  public function getInstrumentContainerSlotsQuery(Request $request) {
+    try {
+      $uri = $request->query->get('uri', '');
+      if ($uri === '') {
+        // Optional: allow URL-safe base64 to avoid any encoding issues.
+        // Example: /workflow/api/instrument/containerslots?uri_b64=...
+        $uri_b64 = $request->query->get('uri_b64', '');
+        if ($uri_b64 !== '') {
+          $normalized = strtr($uri_b64, '-_', '+/');
+          $remainder = strlen($normalized) % 4;
+          if ($remainder) {
+            $normalized .= str_repeat('=', 4 - $remainder);
+          }
+          $decoded = base64_decode($normalized, TRUE);
+          if ($decoded !== FALSE) {
+            $uri = $decoded;
+          }
+        }
+      }
+      if ($uri === '') {
+        return new JsonResponse(['error' => 'Missing uri'], 400);
+      }
+      $result = $this->hascoClient->getInstrumentContainerSlots($uri);
+      return new JsonResponse($result);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
+  /**
+   * GET /workflow/api/instrument/{instrument_uri}/containerslots
+   */
+  public function getInstrumentContainerSlots(Request $request, $instrument_uri) {
+    try {
+      $uri = rawurldecode($instrument_uri);
+      $result = $this->hascoClient->getInstrumentContainerSlots($uri);
       return new JsonResponse($result);
     }
     catch (\Exception $e) {

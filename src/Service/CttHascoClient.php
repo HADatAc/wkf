@@ -269,6 +269,30 @@ class CttHascoClient {
     return $this->request('GET', $endpoint);
   }
 
+  /**
+   * Set required instruments for a task.
+   *
+   * hascoapi expects a JSON payload:
+   * { taskuri: string, requiredInstrument: [{ instrumentUri, requiredComponents?: [{componentUri, containerSlotUri}] }] }
+   *
+   * Returns the updated task body (unwrapped).
+   */
+  public function setTaskRequiredInstruments(string $task_uri, array $required_instrument): array {
+    $payload = [
+      // Note: hascoapi Java controller expects lowercase 'taskuri'.
+      'taskuri' => $task_uri,
+      'requiredInstrument' => $required_instrument,
+    ];
+
+    // This endpoint returns plain text on success (not JSON). We treat it as best-effort
+    // and then fetch the task by URI to return a consistent JSON object to the frontend.
+    $this->request('POST', '/hascoapi/api/task/instruments', [
+      'json' => $payload,
+    ]);
+
+    return $this->getByUri($task_uri);
+  }
+
   // ================================================================
   // Instrument operations
   // ================================================================
@@ -287,6 +311,29 @@ class CttHascoClient {
   public function getInstrumentComponents(string $instrument_uri): array {
     $endpoint = '/hascoapi/api/instrument/components/' . rawurlencode($instrument_uri);
     return $this->request('GET', $endpoint);
+  }
+
+  /**
+   * Get container slots of an instrument.
+   */
+  public function getInstrumentContainerSlots(string $instrument_uri): array {
+    // hascoapi supports an instrument/containerslots endpoint, but in some deployments
+    // the instrument URI is also used as the container URI and the slot-elements endpoint
+    // is the one that actually returns the slot list (with embedded component objects).
+
+    $primary = '/hascoapi/api/instrument/containerslots/' . rawurlencode($instrument_uri);
+    $fallback = '/hascoapi/api/slotelements/bycontainer/' . rawurlencode($instrument_uri);
+
+    $response = $this->request('GET', $primary);
+    $isSuccessful = $response['isSuccessful'] ?? NULL;
+    $body = $response['body'] ?? NULL;
+
+    // If the primary endpoint fails (or returns a non-list body), fall back.
+    if ($isSuccessful === FALSE || (is_string($body) && $body !== '') || (!is_array($body) && $body !== NULL)) {
+      return $this->request('GET', $fallback);
+    }
+
+    return $response;
   }
 
   /**
