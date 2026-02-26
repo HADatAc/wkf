@@ -57,6 +57,13 @@
           attempt++;
           if (typeof window.HASCOWorkflowEditor !== 'undefined' &&
               (window.HASCOWorkflowEditor.mountApp || window.HASCOWorkflowEditor.mountWorkflowEditor)) {
+            try {
+              console.log('[CTT Editor] UMD global present:', {
+                hasGlobal: typeof window.HASCOWorkflowEditor !== 'undefined',
+                hasMountApp: typeof window.HASCOWorkflowEditor.mountApp === 'function',
+                hasMountWorkflowEditor: typeof window.HASCOWorkflowEditor.mountWorkflowEditor === 'function'
+              });
+            } catch (e) {}
             mountEditor(container);
           } else if (attempt < maxAttempts) {
             setTimeout(waitForEditor, 200);

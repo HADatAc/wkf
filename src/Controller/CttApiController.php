@@ -290,6 +290,15 @@ class CttApiController extends ControllerBase {
       $result = $this->hascoClient->setTaskRequiredInstruments($task_uri, $required_instrument);
       return new JsonResponse($result);
     }
+    catch (\RuntimeException $e) {
+      $code = (int) $e->getCode();
+      // If the underlying HTTP call failed, CttHascoClient uses the upstream status code
+      // as the exception code. Preserve it for easier debugging in the browser.
+      if ($code >= 400 && $code <= 599) {
+        return new JsonResponse(['error' => $e->getMessage()], $code);
+      }
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
     catch (\Exception $e) {
       return new JsonResponse(['error' => $e->getMessage()], 500);
     }
@@ -321,10 +330,10 @@ class CttApiController extends ControllerBase {
   public function getInstrument(Request $request) {
     try {
       $uri = $request->query->get('uri', '');
-      $result = $this->hascoClient->getByUri($uri);
+      $result = $this->hascoClient->getInstrumentByUri($uri);
       return new JsonResponse($result);
     }
-    catch (\Exception $e) {
+    catch (\Throwable $e) {
       return new JsonResponse(['error' => $e->getMessage()], 404);
     }
   }
@@ -473,6 +482,45 @@ class CttApiController extends ControllerBase {
     }
     catch (\Exception $e) {
       return new JsonResponse(['error' => $e->getMessage(), 'endpoint' => $endpoint], 500);
+    }
+  }
+
+  // ================================================================
+  // Debug endpoints (admin)
+  // ================================================================
+
+  /**
+   * GET /workflow/api/debug/task-instruments?uri=...
+   *
+   * Returns Drupal-local key/value override for a task's instrument selection.
+   */
+  public function debugTaskInstruments(Request $request) {
+    try {
+      $task_uri = $request->query->get('uri', '');
+      if ($task_uri === '') {
+        $uri_b64 = $request->query->get('uri_b64', '');
+        if ($uri_b64 !== '') {
+          $b64 = strtr($uri_b64, '-_', '+/');
+          $pad = strlen($b64) % 4;
+          if ($pad) {
+            $b64 .= str_repeat('=', 4 - $pad);
+          }
+          $decoded = base64_decode($b64, TRUE);
+          if ($decoded !== FALSE) {
+            $task_uri = $decoded;
+          }
+        }
+      }
+
+      if ($task_uri === '') {
+        return new JsonResponse(['error' => 'Missing parameter: uri'], 400);
+      }
+
+      $result = $this->hascoClient->debugTaskInstrumentOverride($task_uri);
+      return new JsonResponse($result);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
     }
   }
 

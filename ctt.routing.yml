@@ -199,6 +199,19 @@ ctt.api.hasco_proxy:
   methods: [GET, POST, PUT, PATCH, DELETE]
   options:
     no_cache: TRUE
+    parameters:
+      proxy_path:
+        type: path
+
+# Debug: inspect Drupal-local overrides for task instrument selections.
+ctt.api.debug.task_instruments:
+  path: '/workflow/api/debug/task-instruments'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::debugTaskInstruments'
+  requirements:
+    _permission: 'administer ctt'
+  options:
+    no_cache: TRUE
 
 # --- Standalone authentication (CTT dev server → Drupal) ---
 # Validates credentials against Drupal's user DB and returns user identity.
