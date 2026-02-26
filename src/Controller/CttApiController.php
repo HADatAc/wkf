@@ -461,11 +461,32 @@ class CttApiController extends ControllerBase {
   /**
    * Proxy arbitrary hascoapi calls from frontend through Drupal (same-origin).
    */
-  public function proxyHasco($proxy_path, Request $request) {
-    $endpoint = '/hascoapi/api/' . ltrim(rawurldecode($proxy_path), '/');
+  public function proxyHasco(Request $request, $proxy_path = '') {
+    $proxy_path = is_string($proxy_path) ? $proxy_path : '';
+
+    // Primary: path-param route (/workflow/hascoapi/api/{proxy_path})
+    // Fallback: query-param route (/workflow/hascoapi/api?path=...)
+    $path_from_query = (string) $request->query->get('path', '');
+    $use_query_path = ($proxy_path === '' && $path_from_query !== '');
+
+    if ($use_query_path) {
+      // Query params are already URL-decoded once by Symfony.
+      // Frontend must double-encode any embedded URIs so we preserve a single-encoded form here.
+      $proxy_path = $path_from_query;
+    }
+
+    if ($proxy_path === '') {
+      return new JsonResponse(['error' => 'Missing parameter: proxy_path (path) or path (query)'], 400);
+    }
+
+    $path = $use_query_path ? $proxy_path : rawurldecode($proxy_path);
+    $endpoint = '/hascoapi/api/' . ltrim($path, '/');
     $options = [];
 
     $query = $request->query->all();
+    if ($use_query_path) {
+      unset($query['path']);
+    }
     if (!empty($query)) {
       $options['query'] = $query;
     }
