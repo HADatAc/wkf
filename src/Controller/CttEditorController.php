@@ -77,6 +77,50 @@ class CttEditorController extends ControllerBase {
     );
     $drupal_base_url = ($base_path === '' ? '/' : $base_path . '/');
 
+    // Support loading a process via query parameter to avoid encoded-slash issues on Apache/Windows.
+    // Accept either base64-encoded full URI or a raw/percent-encoded URI.
+    $process_from_query = \Drupal::request()->query->get('processUri');
+    if (empty($process_uri) && !empty($process_from_query)) {
+      $decoded = base64_decode((string) $process_from_query, TRUE);
+      if (is_string($decoded) && $decoded !== '' && (str_starts_with($decoded, 'http://') || str_starts_with($decoded, 'https://'))) {
+        $process_uri = $decoded;
+      }
+      else {
+        $process_uri = rawurldecode((string) $process_from_query);
+      }
+    }
+
+    $study_from_query = \Drupal::request()->query->get('studyUri');
+    $study_uri = NULL;
+    if (!empty($study_from_query)) {
+      $decoded_study = base64_decode((string) $study_from_query, TRUE);
+      if (is_string($decoded_study) && $decoded_study !== '' && (str_starts_with($decoded_study, 'http://') || str_starts_with($decoded_study, 'https://'))) {
+        $study_uri = $decoded_study;
+      }
+      else {
+        // If it was passed already as a plain URI, keep it.
+        $study_uri = rawurldecode((string) $study_from_query);
+      }
+    }
+
+    // Execution context passed from the "Create Execution" flow.
+    $encodedDaUri = \Drupal::request()->query->get('daUri');
+    $encodedDataFileUri = \Drupal::request()->query->get('dataFileUri');
+    $daUri = NULL;
+    $dataFileUri = NULL;
+    if (!empty($encodedDaUri) && is_string($encodedDaUri)) {
+      $decoded = base64_decode($encodedDaUri, TRUE);
+      if ($decoded !== FALSE && $decoded !== '') {
+        $daUri = $decoded;
+      }
+    }
+    if (!empty($encodedDataFileUri) && is_string($encodedDataFileUri)) {
+      $decoded = base64_decode($encodedDataFileUri, TRUE);
+      if ($decoded !== FALSE && $decoded !== '') {
+        $dataFileUri = $decoded;
+      }
+    }
+
     // Build drupalSettings for the React app.
     $drupal_settings = [
       'drupalBaseUrl' => $drupal_base_url,
@@ -86,6 +130,7 @@ class CttEditorController extends ControllerBase {
       'defaultNamespaceUrl' => $default_namespace_url,
       'csrfToken' => $csrf_token,
       'processUri' => $process_uri ? rawurldecode($process_uri) : NULL,
+      'studyUri' => $study_uri,
       'currentUser' => [
         'id' => (string) $account->id(),
         'name' => $account->getDisplayName(),
@@ -96,6 +141,10 @@ class CttEditorController extends ControllerBase {
         'createWorkflow' => '/std/manage/addworkflow/active',
         'manageInstruments' => '/sir/manage/instruments',
         'createTask' => '/std/manage/addtask/active/',
+      ],
+      'execution' => [
+        'daUri' => $daUri,
+        'dataFileUri' => $dataFileUri,
       ],
     ];
 
