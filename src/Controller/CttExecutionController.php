@@ -9,12 +9,19 @@ use Drupal\file\Entity\File;
 use Drupal\rep\Constant;
 use Drupal\rep\Utils;
 use Drupal\rep\Vocabulary\HASCO;
+use Drupal\Core\Url;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class CttExecutionController extends ControllerBase {
+
+  protected static function isUri(string $value): bool {
+    $v = trim($value);
+    return $v !== '' && (str_starts_with($v, 'http://') || str_starts_with($v, 'https://'));
+  }
 
   protected static function csvEscape(string $value): string {
     $needs_quotes = strpbrk($value, ",\n\r\t") !== FALSE;
@@ -40,13 +47,28 @@ class CttExecutionController extends ControllerBase {
     $header = [
       'record_type',
       'ts',
+      'study_uri',
+      'process_uri',
+      'da_uri',
+      'datafile_uri',
       'node_id',
       'node_label',
       'kind_or_type',
+      'instrument_uri',
+      'instrument_label',
+      'component_uri',
+      'component_label',
+      'value',
+      'display_value',
       'message',
       'value_json',
     ];
     $lines[] = implode(',', $header);
+
+    $metaStudy = (string) ($meta['studyUri'] ?? '');
+    $metaProcess = (string) ($meta['processUri'] ?? '');
+    $metaDa = (string) ($meta['daUri'] ?? '');
+    $metaDataFile = (string) ($meta['dataFileUri'] ?? '');
 
     $events = $snapshot['events'] ?? [];
     if (is_array($events)) {
@@ -57,9 +79,20 @@ class CttExecutionController extends ControllerBase {
         $row = [
           'event',
           (string) ($e['ts'] ?? ''),
+          $metaStudy,
+          $metaProcess,
+          $metaDa,
+          $metaDataFile,
           (string) ($e['nodeId'] ?? ''),
           '',
           (string) ($e['type'] ?? ''),
+          '',
+          '',
+          '',
+          '',
+          '',
+          '',
+          '',
           (string) ($e['message'] ?? ''),
           '',
         ];
@@ -81,13 +114,72 @@ class CttExecutionController extends ControllerBase {
           $value_json = '';
         }
 
+        $kind = (string) ($a['kind'] ?? '');
+        if ($kind === 'instrument-form' && !empty($a['fields']) && is_array($a['fields'])) {
+          foreach ($a['fields'] as $f) {
+            if (!is_array($f)) {
+              continue;
+            }
+            $row = [
+              'answer',
+              (string) ($a['ts'] ?? ''),
+              $metaStudy,
+              $metaProcess,
+              $metaDa,
+              $metaDataFile,
+              (string) ($a['nodeId'] ?? ''),
+              (string) ($a['nodeLabel'] ?? ''),
+              'instrument-form-field',
+              (string) ($a['instrumentUri'] ?? ''),
+              (string) ($a['instrumentLabel'] ?? ''),
+              (string) ($f['componentUri'] ?? ''),
+              (string) ($f['label'] ?? ''),
+              (string) ($f['value'] ?? ''),
+              (string) ($f['displayValue'] ?? ''),
+              '',
+              $value_json,
+            ];
+            $lines[] = implode(',', array_map([static::class, 'csvEscape'], $row));
+          }
+          continue;
+        }
+
+        $value = '';
+        $displayValue = '';
+        if ($kind === 'choice') {
+          $value = (string) ($a['selectionId'] ?? '');
+          $displayValue = (string) ($a['selectionLabel'] ?? '');
+        }
+        elseif ($kind === 'number') {
+          $value = (string) ($a['value'] ?? '');
+          $displayValue = $value;
+        }
+        elseif ($kind === 'text') {
+          $value = (string) ($a['value'] ?? '');
+          $displayValue = $value;
+        }
+        elseif ($kind === 'confirm') {
+          $value = ((bool) ($a['value'] ?? FALSE)) ? 'true' : 'false';
+          $displayValue = $value;
+        }
+
         $row = [
           'answer',
           (string) ($a['ts'] ?? ''),
+          $metaStudy,
+          $metaProcess,
+          $metaDa,
+          $metaDataFile,
           (string) ($a['nodeId'] ?? ''),
           (string) ($a['nodeLabel'] ?? ''),
-          (string) ($a['kind'] ?? ''),
+          $kind,
+          (string) ($a['instrumentUri'] ?? ''),
+          (string) ($a['instrumentLabel'] ?? ''),
           '',
+          '',
+          $value,
+          $displayValue,
+          (string) ($a['prompt'] ?? ''),
           $value_json,
         ];
         $lines[] = implode(',', array_map([static::class, 'csvEscape'], $row));
@@ -114,7 +206,9 @@ class CttExecutionController extends ControllerBase {
     }
 
     $timestamp = (new \DateTimeImmutable('now'))->format('Ymd_His');
-    $filename = 'SIMRUN-' . $studyBasename . '-' . $timestamp . '.csv';
+    // Naming convention required by org: DA-XXXXXX
+    $suffix = strtoupper(bin2hex(random_bytes(3))); // 6 hex chars
+    $filename = 'DA-' . $suffix . '.csv';
 
     $directory = 'private://std/' . $studyBasename . '/da';
     try {
@@ -129,7 +223,7 @@ class CttExecutionController extends ControllerBase {
       ];
     }
 
-    $csv = "simulation_run_id,created_at\n" . $timestamp . "," . (new \DateTimeImmutable('now'))->format(DATE_ATOM) . "\n";
+    $csv = "da_id,created_at,study\n" . $filename . "," . (new \DateTimeImmutable('now'))->format(DATE_ATOM) . "," . $decodedStudyUri . "\n";
     $destination = $directory . '/' . $filename;
     $savedUri = $fs->saveData($csv, $destination, FileSystemInterface::EXISTS_RENAME);
 
@@ -291,23 +385,13 @@ class CttExecutionController extends ControllerBase {
     // Persist chosen association for future inference.
     \Drupal::state()->set('ctt.study_process.' . sha1($decodedStudyUri), $processUri);
 
-    // Create + register the DA/DataFile stub now (so the Study gets the DA), then open CTT.
-    $result = $this->createSimulationRun($decodedStudyUri, $processUri);
-    if (!empty($result['ok'])) {
-      $this->messenger()->addStatus($this->t('Execution created: @filename', ['@filename' => $result['filename']]));
-    }
-    else {
-      $this->messenger()->addWarning($this->t('Execution file was created locally, but semantic registration may have failed.'));
-    }
-
     return $this->redirect('ctt.editor', [], [
       'query' => [
         // Pass the raw URI (will be URL-encoded in the query string) so the React app can read it.
         'processUri' => $processUri,
         'studyUri' => $studyuri,
-        // Pass execution context so the editor can save to the right DA/DataFile.
-        'daUri' => !empty($result['daUri']) ? base64_encode($result['daUri']) : NULL,
-        'dataFileUri' => !empty($result['dataFileUri']) ? base64_encode($result['dataFileUri']) : NULL,
+        // Execution mode: workflow is read-only and DA is created only at the end.
+        'execution' => '1',
       ],
     ]);
   }
@@ -325,19 +409,43 @@ class CttExecutionController extends ControllerBase {
       return new JsonResponse(['ok' => FALSE, 'error' => 'Invalid JSON body.'], 400);
     }
 
-    $daUri = trim((string) ($payload['daUri'] ?? ''));
-    if ($daUri === '') {
-      return new JsonResponse(['ok' => FALSE, 'error' => 'Missing parameter: daUri'], 400);
-    }
-
     $snapshot = $payload['snapshot'] ?? NULL;
     if (!is_array($snapshot)) {
       return new JsonResponse(['ok' => FALSE, 'error' => 'Missing/invalid parameter: snapshot'], 400);
     }
 
-    $ctx = \Drupal::state()->get('ctt.execution.' . sha1($daUri));
-    if (empty($ctx) || !is_array($ctx)) {
-      return new JsonResponse(['ok' => FALSE, 'error' => 'Execution context not found (DA not created by this UI/session).'], 404);
+    // If daUri is provided and we have stored context, overwrite existing.
+    $daUri = trim((string) ($payload['daUri'] ?? ''));
+    $ctx = NULL;
+    if ($daUri !== '') {
+      $candidate = \Drupal::state()->get('ctt.execution.' . sha1($daUri));
+      if (!empty($candidate) && is_array($candidate)) {
+        $ctx = $candidate;
+      }
+    }
+
+    // Otherwise, create DA/DataFile now (end of simulation).
+    if (!$ctx) {
+      $studyUri = trim((string) ($payload['studyUri'] ?? ''));
+      if (!static::isUri($studyUri)) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Missing/invalid parameter: studyUri'], 400);
+      }
+
+      $processUri = trim((string) ($payload['processUri'] ?? ''));
+      if ($processUri !== '' && !static::isUri($processUri)) {
+        $processUri = '';
+      }
+
+      $create = $this->createSimulationRun($studyUri, $processUri !== '' ? $processUri : NULL);
+      if (empty($create['ok']) || empty($create['daUri'])) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Failed to create DA/DataFile for this execution.'], 500);
+      }
+
+      $daUri = (string) $create['daUri'];
+      $ctx = \Drupal::state()->get('ctt.execution.' . sha1($daUri));
+      if (empty($ctx) || !is_array($ctx)) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Execution context could not be loaded after creation.'], 500);
+      }
     }
 
     $fid = (int) ($ctx['fileId'] ?? 0);
@@ -406,9 +514,48 @@ class CttExecutionController extends ControllerBase {
       'daUri' => $daUri,
       'dataFileUri' => $dataFileUri,
       'filename' => $filename,
+      'downloadUrl' => Url::fromRoute('ctt.execution_download', [], ['query' => ['daUri' => $daUri]])->toString(),
       'uploaded' => $uploaded,
       'uploadResult' => $upload_result,
     ]);
+  }
+
+  /**
+   * Download the generated DA CSV (private file) for a given execution.
+   */
+  public function downloadDaFile(Request $request): Response {
+    $daUri = trim((string) $request->query->get('daUri'));
+    if ($daUri === '') {
+      return new Response('Missing parameter: daUri', 400);
+    }
+
+    $ctx = \Drupal::state()->get('ctt.execution.' . sha1($daUri));
+    if (empty($ctx) || !is_array($ctx)) {
+      return new Response('Execution context not found.', 404);
+    }
+
+    $fid = (int) ($ctx['fileId'] ?? 0);
+    $filename = trim((string) ($ctx['filename'] ?? ''));
+    if ($fid <= 0) {
+      return new Response('Execution context is incomplete.', 500);
+    }
+
+    $fileEntity = File::load($fid);
+    if (!$fileEntity) {
+      return new Response('Drupal file entity not found.', 404);
+    }
+
+    $fs = \Drupal::service('file_system');
+    $real = $fs->realpath($fileEntity->getFileUri());
+    if (!$real || !is_file($real)) {
+      return new Response('File not found on disk.', 404);
+    }
+
+    $downloadName = $filename !== '' ? $filename : basename($real);
+    $resp = new BinaryFileResponse($real);
+    $resp->headers->set('Content-Type', 'text/csv; charset=utf-8');
+    $resp->setContentDisposition('attachment', $downloadName);
+    return $resp;
   }
 
   public function simulateExecution(string $studyuri): RedirectResponse|Response {

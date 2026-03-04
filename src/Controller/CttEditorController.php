@@ -104,6 +104,9 @@ class CttEditorController extends ControllerBase {
     }
 
     // Execution context passed from the "Create Execution" flow.
+    $executionFlag = (string) \Drupal::request()->query->get('execution');
+    $isExecutionMode = ($executionFlag === '1' || strtolower($executionFlag) === 'true');
+
     $encodedDaUri = \Drupal::request()->query->get('daUri');
     $encodedDataFileUri = \Drupal::request()->query->get('dataFileUri');
     $daUri = NULL;
@@ -143,8 +146,11 @@ class CttEditorController extends ControllerBase {
         'createTask' => '/std/manage/addtask/active/',
       ],
       'execution' => [
+        'mode' => $isExecutionMode ? 'execution' : 'edit',
         'daUri' => $daUri,
         'dataFileUri' => $dataFileUri,
+        'studyUri' => $study_uri,
+        'processUri' => $process_uri ? rawurldecode($process_uri) : NULL,
       ],
     ];
 

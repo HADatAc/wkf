@@ -34,19 +34,31 @@
         container.style.display = 'block';
         container.style.position = 'relative';
         container.style.overflow = 'hidden';
+        // Let the Drupal page layout control width/position.
+        container.style.flex = '1 1 auto';
+        container.style.minHeight = '0';
 
         function applyContainerSize() {
           var rect = container.getBoundingClientRect();
-          var top = Math.max(0, rect.top);
+          var containerTop = Math.max(0, rect.top);
           var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 800;
-          var nextHeight = Math.max(420, Math.floor(viewportHeight - top));
-          container.style.height = nextHeight + 'px';
-          container.style.minHeight = nextHeight + 'px';
+          var footer = document.querySelector('footer.site-footer');
+          var footerTop = viewportHeight;
+
+          if (footer && typeof footer.getBoundingClientRect === 'function') {
+            var footerRect = footer.getBoundingClientRect();
+            if (footerRect && footerRect.top > 0) {
+              footerTop = Math.min(viewportHeight, footerRect.top);
+            }
+          }
+
+          var availableHeight = Math.max(420, Math.floor(footerTop - containerTop));
+          container.style.height = availableHeight + 'px';
+          container.style.minHeight = availableHeight + 'px';
         }
 
         applyContainerSize();
         window.addEventListener('resize', applyContainerSize, { passive: true });
-        // Re-apply after toolbar/admin bars settle.
         setTimeout(applyContainerSize, 50);
         setTimeout(applyContainerSize, 250);
 

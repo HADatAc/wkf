@@ -232,6 +232,17 @@ ctt.execution_save:
   options:
     no_cache: TRUE
 
+ctt.execution_download:
+  path: '/ctt/execution/download'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttExecutionController::downloadDaFile'
+    _title: 'Download Execution Output'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
 # Query-param variant to support multi-segment proxy paths on Apache/Windows.
 # Usage: /workflow/hascoapi/api?path=slots/bycodebook/{encodedUri}/50/0
 ctt.api.hasco_proxy_query:
