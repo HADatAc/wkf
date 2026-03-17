@@ -67,20 +67,47 @@
          */
         function waitForEditor() {
           attempt++;
-          if (typeof window.HASCOWorkflowEditor !== 'undefined' &&
-              (window.HASCOWorkflowEditor.mountApp || window.HASCOWorkflowEditor.mountWorkflowEditor)) {
+          // Support older/newer UMD global names.
+          var umdGlobal = window.HASCOWorkflowEditor || window.HascoWorkflowEditor || window.hascoWorkflowEditor;
+          if (typeof umdGlobal !== 'undefined' &&
+              (umdGlobal.mountApp || umdGlobal.mountWorkflowEditor)) {
             try {
               console.log('[CTT Editor] UMD global present:', {
-                hasGlobal: typeof window.HASCOWorkflowEditor !== 'undefined',
-                hasMountApp: typeof window.HASCOWorkflowEditor.mountApp === 'function',
-                hasMountWorkflowEditor: typeof window.HASCOWorkflowEditor.mountWorkflowEditor === 'function'
+                hasGlobal: typeof umdGlobal !== 'undefined',
+                hasMountApp: typeof umdGlobal.mountApp === 'function',
+                hasMountWorkflowEditor: typeof umdGlobal.mountWorkflowEditor === 'function'
               });
             } catch (e) {}
             mountEditor(container);
           } else if (attempt < maxAttempts) {
             setTimeout(waitForEditor, 200);
           } else {
-            container.innerHTML = '<p style="color:red;">Failed to load CTT editor. Check the browser console for errors.</p>';
+            try {
+              var umdScript = document.querySelector('script[src*="hasco-workflow-editor.umd.js"]');
+              var aggregatedScript = document.querySelector('script[src*="/sites/default/files/js/"]');
+              var baseUrlGuess = (drupalSettings.path && drupalSettings.path.baseUrl) || settings.drupalBaseUrl || '/';
+              console.error('[CTT Editor] UMD global not detected after ' + maxAttempts + ' attempts.', {
+                hasGlobal: typeof window.HASCOWorkflowEditor !== 'undefined' || typeof window.HascoWorkflowEditor !== 'undefined' || typeof window.hascoWorkflowEditor !== 'undefined',
+                baseUrl: baseUrlGuess,
+                umdScriptSrc: umdScript ? umdScript.getAttribute('src') : null,
+                hasAggregatedJs: Boolean(aggregatedScript),
+                settings: drupalSettings.ctt || settings || {},
+              });
+              if (!umdScript) {
+                console.error('[CTT Editor] Script tag for hasco-workflow-editor.umd.js not found. If JS aggregation is enabled, the UMD may be bundled into /sites/default/files/js/js_*.js. Otherwise, check that the library is attached and that the file exists in the deployed build.');
+              }
+            } catch (e) {
+              // Ignore logging errors.
+            }
+            var debugHint = '';
+            try {
+              var umdScript2 = document.querySelector('script[src*="hasco-workflow-editor.umd.js"]');
+              var aggregated2 = document.querySelector('script[src*="/sites/default/files/js/"]');
+              debugHint = '<br/><small style="color:#666;">' +
+                'UMD script tag: ' + (umdScript2 ? 'found' : (aggregated2 ? 'not found (JS aggregated)' : 'not found')) +
+                '</small>';
+            } catch (e) {}
+            container.innerHTML = '<p style="color:red;">Failed to load CTT editor. Check the browser console for errors.</p>' + debugHint;
           }
         }
 
@@ -101,7 +128,7 @@
     container.innerHTML = '';
     container.style.overflow = 'hidden';
 
-    var lib = window.HASCOWorkflowEditor;
+    var lib = window.HASCOWorkflowEditor || window.HascoWorkflowEditor || window.hascoWorkflowEditor;
 
     if (typeof lib.mountApp === 'function') {
       console.log('[CTT Editor] Mounting full App (same as standalone).');
