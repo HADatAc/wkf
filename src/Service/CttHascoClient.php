@@ -89,7 +89,30 @@ class CttHascoClient {
    */
   protected function getApiUrl(): string {
     $config = $this->configFactory->get('ctt.settings');
-    return rtrim($config->get('hasco_api_url') ?: 'http://localhost:9000', '/');
+    $ctt_url = trim((string) ($config->get('hasco_api_url') ?? ''));
+
+    // Prefer explicit CTT configuration.
+    if ($ctt_url !== '' && filter_var($ctt_url, FILTER_VALIDATE_URL)) {
+      return rtrim($ctt_url, '/');
+    }
+
+    // Fallback to REP configuration (CTT depends on REP).
+    if (\Drupal::moduleHandler()->moduleExists('rep')) {
+      try {
+        $rep_url = (string) \Drupal\rep\Utils::configApiUrl();
+        $rep_url = trim($rep_url);
+        // REP's install default may be a placeholder; ignore it.
+        if ($rep_url !== '' && strpos($rep_url, 'http://x.x.x.x:9000') === FALSE && filter_var($rep_url, FILTER_VALIDATE_URL)) {
+          return rtrim($rep_url, '/');
+        }
+      }
+      catch (\Exception $e) {
+        // Ignore and throw a config error below.
+      }
+    }
+
+    // Do NOT silently default to localhost in production.
+    throw new \RuntimeException('CTT is not configured: missing ctt.settings.hasco_api_url (and no usable rep.settings.api_url fallback). Configure /admin/config/ctt/settings.');
   }
 
   /**

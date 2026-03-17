@@ -30,11 +30,29 @@ class CttSettingsForm extends ConfigFormBase {
   public function buildForm(array $form, FormStateInterface $form_state) {
     $config = $this->config('ctt.settings');
 
+    // Prefer existing CTT config; fallback to REP config if available.
+    $default_hasco_api_url = (string) ($config->get('hasco_api_url') ?? '');
+    if ($default_hasco_api_url === '' && \Drupal::moduleHandler()->moduleExists('rep')) {
+      try {
+        $rep_url = (string) \Drupal\rep\Utils::configApiUrl();
+        $rep_url = trim($rep_url);
+        if ($rep_url !== '' && strpos($rep_url, 'http://x.x.x.x:9000') === FALSE) {
+          $default_hasco_api_url = $rep_url;
+        }
+      }
+      catch (\Exception $e) {
+        // Ignore.
+      }
+    }
+    if ($default_hasco_api_url === '') {
+      $default_hasco_api_url = 'http://localhost:9000';
+    }
+
     $form['hasco_api_url'] = [
       '#type' => 'textfield',
       '#title' => $this->t('HASCO API URL'),
-      '#description' => $this->t('Base URL of the hascoapi Play Framework backend (e.g., http://localhost:9000).'),
-      '#default_value' => $config->get('hasco_api_url') ?: 'http://localhost:9000',
+      '#description' => $this->t('Base URL of the hascoapi Play Framework backend. In production, this must NOT be localhost. If REP is configured, this field will default to REP\'s api_url.'),
+      '#default_value' => $default_hasco_api_url,
       '#required' => TRUE,
     ];
 
