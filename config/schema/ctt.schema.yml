@@ -2,9 +2,6 @@ ctt.settings:
   type: config_object
   label: 'CTT Editor settings'
   mapping:
-    hasco_api_url:
-      type: string
-      label: 'HASCO API URL'
     jwt_key_id:
       type: string
       label: 'JWT Key ID'

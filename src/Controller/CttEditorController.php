@@ -46,7 +46,6 @@ class CttEditorController extends ControllerBase {
    */
   public function editorPage($process_uri = NULL) {
     $config = $this->configFactory->get('ctt.settings');
-    $hasco_api_url = $config->get('hasco_api_url') ?: 'http://localhost:9000';
     $default_namespace_url = $config->get('default_namespace_url') ?: NULL;
 
     if (!$default_namespace_url && \Drupal::moduleHandler()->moduleExists('rep')) {
