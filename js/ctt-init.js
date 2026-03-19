@@ -1,6 +1,6 @@
 /**
  * @file
- * CTT Editor initialization — Drupal behavior that bootstraps the full React App.
+ * CTT Editor initialization - Drupal behavior that bootstraps the full React App.
  *
  * Reads configuration from drupalSettings.ctt and mounts the
  * complete CTT application (same canvas as standalone) into #ctt-workflow-app.

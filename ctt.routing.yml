@@ -1,5 +1,5 @@
 # ==========================================
-# CTT Workflow Editor — Routes
+# CTT Workflow Editor - Routes
 # ==========================================
 
 # --- Editor page (renders the React app) ---
@@ -70,6 +70,52 @@ ctt.api.process.tree:
     _controller: '\Drupal\ctt\Controller\CttApiController::getProcessTree'
   requirements:
     _permission: 'access ctt editor'
+
+# Version history (local-only). The editor calls this with an encoded URI
+# that may contain decoded slashes under Apache, so allow any chars.
+ctt.api.process.versions.get:
+  path: '/workflow/api/process/{process_uri}/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcessVersions'
+  requirements:
+    _permission: 'access ctt editor'
+    process_uri: '.+'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.process.versions.create:
+  path: '/workflow/api/process/{process_uri}/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::createProcessVersion'
+  requirements:
+    _permission: 'access ctt editor'
+    process_uri: '.+'
+  methods: [POST]
+  options:
+    no_cache: TRUE
+
+# Query-param versions endpoint to avoid Apache rejecting encoded slashes.
+# Frontend should call: /workflow/api/process/versions?uri=...
+ctt.api.process.versions_query.get:
+  path: '/workflow/api/process/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcessVersionsQuery'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.process.versions_query.create:
+  path: '/workflow/api/process/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::createProcessVersionQuery'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [POST]
+  options:
+    no_cache: TRUE
 
 # Task CRUD
 ctt.api.task.list:

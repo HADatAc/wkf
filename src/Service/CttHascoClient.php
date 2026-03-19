@@ -967,16 +967,28 @@ class CttHascoClient {
     $primary = '/hascoapi/api/instrument/containerslots/' . rawurlencode($instrument_uri);
     $fallback = '/hascoapi/api/slotelements/bycontainer/' . rawurlencode($instrument_uri);
 
-    $response = $this->request('GET', $primary);
-    $isSuccessful = $response['isSuccessful'] ?? NULL;
-    $body = $response['body'] ?? NULL;
-
-    // If the primary endpoint fails (or returns a non-list body), fall back.
-    if ($isSuccessful === FALSE || (is_string($body) && $body !== '') || (!is_array($body) && $body !== NULL)) {
-      return $this->request('GET', $fallback);
+    try {
+      $response = $this->request('GET', $primary);
+      // If the response is a non-list body, fall back.
+      $body = $response['body'] ?? $response;
+      if (is_string($body) || (!is_array($body) && $body !== NULL)) {
+        return $this->request('GET', $fallback);
+      }
+      return $response;
     }
-
-    return $response;
+    catch (\Exception $e) {
+      // Primary endpoint failed - try fallback before giving up.
+      try {
+        return $this->request('GET', $fallback);
+      }
+      catch (\Exception $e2) {
+        // Both endpoints failed - return empty array rather than crashing.
+        $this->logger->warning('Container slots: both endpoints failed for @uri', [
+          '@uri' => $instrument_uri,
+        ]);
+        return [];
+      }
+    }
   }
 
   /**

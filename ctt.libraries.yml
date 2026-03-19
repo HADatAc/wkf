@@ -1,4 +1,4 @@
-# CTT React Editor — main library bundle
+# CTT React Editor - main library bundle
 ctt-editor-app:
   version: 1.x
   css:
@@ -12,7 +12,7 @@ ctt-editor-app:
     - core/drupalSettings
     - core/once
 
-# CTT Editor init — Drupal behavior that bootstraps the React app
+# CTT Editor init - Drupal behavior that bootstraps the React app
 ctt-editor-init:
   version: 1.x
   css:

@@ -9,7 +9,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Drupal\ctt\Service\CttHascoClient;
 
 /**
- * API proxy controller — sits between the CTT React editor and hascoapi.
+ * API proxy controller - sits between the CTT React editor and hascoapi.
  *
  * All endpoints return JsonResponse so the frontend DrupalAdapter can
  * consume them via fetch().  Each method delegates to CttHascoClient
@@ -127,6 +127,207 @@ class CttApiController extends ControllerBase {
     catch (\Exception $e) {
       return new JsonResponse(['error' => $e->getMessage()], 500);
     }
+  }
+
+  /**
+   * GET /workflow/api/process/{process_uri}/versions
+   *
+   * The JS editor expects an array of version entries.
+   * Currently this is stored locally in Drupal (not in hascoapi).
+   */
+  public function getProcessVersions(Request $request, $process_uri) {
+    try {
+      $uri = is_string($process_uri) ? $process_uri : '';
+      if (strpos($uri, '%') !== FALSE) {
+        $uri = rawurldecode($uri);
+      }
+      $uri = trim($uri);
+
+      $collection = \Drupal::keyValue('ctt.process_versions');
+      $key = hash('sha256', $uri);
+      $versions = $collection->get($key, []);
+      if (!is_array($versions)) {
+        $versions = [];
+      }
+
+      // Return newest-first for convenience.
+      $versions = array_values(array_reverse($versions));
+      return new JsonResponse($versions);
+    }
+    catch (\Exception $e) {
+      // Be permissive: version history should never break the editor.
+      return new JsonResponse([], 200);
+    }
+  }
+
+  /**
+   * POST /workflow/api/process/{process_uri}/versions
+   * Body: { changelog: string }
+   */
+  public function createProcessVersion(Request $request, $process_uri) {
+    try {
+      $uri = is_string($process_uri) ? $process_uri : '';
+      if (strpos($uri, '%') !== FALSE) {
+        $uri = rawurldecode($uri);
+      }
+      $uri = trim($uri);
+      if ($uri === '') {
+        return new JsonResponse(['error' => 'Missing process URI'], 400);
+      }
+
+      $data = json_decode($request->getContent(), TRUE);
+      if (!is_array($data)) {
+        $data = [];
+      }
+      $changelog = trim((string) ($data['changelog'] ?? ''));
+
+      $collection = \Drupal::keyValue('ctt.process_versions');
+      $key = hash('sha256', $uri);
+      $versions = $collection->get($key, []);
+      if (!is_array($versions)) {
+        $versions = [];
+      }
+
+      $versionNumber = count($versions) + 1;
+      $createdAt = gmdate('c');
+      $createdBy = '';
+      try {
+        $account = $this->currentUser();
+        $user = \Drupal\user\Entity\User::load($account->id());
+        if ($user) {
+          $createdBy = (string) $user->getEmail();
+        }
+      }
+      catch (\Throwable $ignored) {
+        // Ignore.
+      }
+
+      $entry = [
+        'uri' => 'ctt:version:' . $key . ':' . $versionNumber,
+        'processUri' => $uri,
+        'versionNumber' => $versionNumber,
+        'changelog' => $changelog,
+        'createdAt' => $createdAt,
+        'createdBy' => $createdBy,
+      ];
+
+      $versions[] = $entry;
+      $collection->set($key, $versions);
+
+      return new JsonResponse($entry, 201);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
+  /**
+   * GET /workflow/api/process/versions?uri=...
+   * Optional: uri_b64=... (base64url)
+   */
+  public function getProcessVersionsQuery(Request $request) {
+    $uri = trim((string) $request->query->get('uri', ''));
+    if ($uri === '') {
+      $uri_b64 = trim((string) $request->query->get('uri_b64', ''));
+      if ($uri_b64 !== '') {
+        $b64 = strtr($uri_b64, '-_', '+/');
+        $pad = strlen($b64) % 4;
+        if ($pad) {
+          $b64 .= str_repeat('=', 4 - $pad);
+        }
+        $decoded = base64_decode($b64, TRUE);
+        if ($decoded !== FALSE) {
+          $uri = trim((string) $decoded);
+        }
+      }
+    }
+
+    // Keep behavior permissive.
+    if ($uri === '') {
+      return new JsonResponse([]);
+    }
+
+    $collection = \Drupal::keyValue('ctt.process_versions');
+    $key = hash('sha256', $uri);
+    $versions = $collection->get($key, []);
+    if (!is_array($versions)) {
+      $versions = [];
+    }
+    $versions = array_values(array_reverse($versions));
+    return new JsonResponse($versions);
+  }
+
+  /**
+   * POST /workflow/api/process/versions?uri=...
+   * Body: { changelog: string }
+   */
+  public function createProcessVersionQuery(Request $request) {
+    $uri = trim((string) $request->query->get('uri', ''));
+    if ($uri === '') {
+      // Also accept processUri in JSON body for compatibility.
+      $data = json_decode($request->getContent(), TRUE);
+      if (is_array($data) && !empty($data['processUri'])) {
+        $uri = trim((string) $data['processUri']);
+      }
+    }
+    if ($uri === '') {
+      $uri_b64 = trim((string) $request->query->get('uri_b64', ''));
+      if ($uri_b64 !== '') {
+        $b64 = strtr($uri_b64, '-_', '+/');
+        $pad = strlen($b64) % 4;
+        if ($pad) {
+          $b64 .= str_repeat('=', 4 - $pad);
+        }
+        $decoded = base64_decode($b64, TRUE);
+        if ($decoded !== FALSE) {
+          $uri = trim((string) $decoded);
+        }
+      }
+    }
+
+    if ($uri === '') {
+      return new JsonResponse(['error' => 'Missing parameter: uri'], 400);
+    }
+
+    $data = json_decode($request->getContent(), TRUE);
+    if (!is_array($data)) {
+      $data = [];
+    }
+    $changelog = trim((string) ($data['changelog'] ?? ''));
+
+    $collection = \Drupal::keyValue('ctt.process_versions');
+    $key = hash('sha256', $uri);
+    $versions = $collection->get($key, []);
+    if (!is_array($versions)) {
+      $versions = [];
+    }
+
+    $versionNumber = count($versions) + 1;
+    $createdAt = gmdate('c');
+    $createdBy = '';
+    try {
+      $account = $this->currentUser();
+      $user = \Drupal\user\Entity\User::load($account->id());
+      if ($user) {
+        $createdBy = (string) $user->getEmail();
+      }
+    }
+    catch (\Throwable $ignored) {
+      // Ignore.
+    }
+
+    $entry = [
+      'uri' => 'ctt:version:' . $key . ':' . $versionNumber,
+      'processUri' => $uri,
+      'versionNumber' => $versionNumber,
+      'changelog' => $changelog,
+      'createdAt' => $createdAt,
+      'createdBy' => $createdBy,
+    ];
+
+    $versions[] = $entry;
+    $collection->set($key, $versions);
+    return new JsonResponse($entry, 201);
   }
 
   // ================================================================
