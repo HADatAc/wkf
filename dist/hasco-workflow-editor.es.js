@@ -162,8 +162,8 @@ return dt.jsxs("div",{className:"space-y-1",children:[
 /* @__PURE__ */dt.jsx("h3",{className:"font-medium",children:g.label}),
 /* @__PURE__ */dt.jsxs("p",{className:"text-sm text-gray-600",children:[x.size," components selected"]})]}),
 /* @__PURE__ */dt.jsxs("div",{className:"mb-4 flex gap-2",children:[
-/* @__PURE__ */dt.jsx("button",{onClick:()=>{const e=y.map(e=>l(e.uri)).filter(Boolean);B(new Set(e))},className:"px-2.5 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200",children:"Select All"}),
-/* @__PURE__ */dt.jsx("button",{onClick:()=>{B(/* @__PURE__ */new Set)},className:"px-2.5 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200",children:"Clear All"})]}),
+/* @__PURE__ */dt.jsx("button",{type:"button",onClick:()=>{const e=y.map(e=>l(e.uri)).filter(Boolean);B(new Set(e))},className:"inline-flex h-8 items-center justify-center rounded-md border border-indigo-200 bg-white px-3 text-sm font-medium text-indigo-700 hover:bg-indigo-50",children:"Select All"}),
+/* @__PURE__ */dt.jsx("button",{type:"button",onClick:()=>{B(/* @__PURE__ */new Set)},className:"inline-flex h-8 items-center justify-center rounded-md border border-gray-200 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50",children:"Clear All"})]}),
 /* @__PURE__ */dt.jsxs("div",{className:"border rounded max-h-[400px] overflow-y-auto",children:[w.length>0?/* @__PURE__ */dt.jsxs("div",{className:"border-b bg-gray-50 px-3 py-2",children:[
 /* @__PURE__ */dt.jsx("div",{className:"text-xs font-semibold text-gray-700",children:"Container slots"}),
 /* @__PURE__ */dt.jsx("div",{className:"mt-1 space-y-1",children:w.map(e=>/* @__PURE__ */dt.jsxs("div",{className:"flex items-center justify-between text-xs text-gray-700",children:[
