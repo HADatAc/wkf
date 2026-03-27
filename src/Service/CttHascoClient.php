@@ -298,17 +298,20 @@ class CttHascoClient {
     $store = $this->getTaskInstrumentStore();
 
     $normalized = $this->normalizeRequiredInstrumentForStorage($required_instrument);
-    if (empty($normalized)) {
-      $store->delete($key);
-      $this->logger->debug('CTT KV override cleared for task @task', ['@task' => $task_uri]);
-      return;
-    }
-
+    // IMPORTANT: we must distinguish "no override" vs "explicitly cleared".
+    // Clearing instruments cannot be reliably persisted to hascoapi (empty payload 400s),
+    // so we store an explicit empty override marker to hide any stale API values.
     $store->set($key, [
       'taskUri' => $task_uri,
       'requiredInstrument' => $normalized,
       'savedAt' => time(),
+      'cleared' => empty($normalized),
     ]);
+
+    if (empty($normalized)) {
+      $this->logger->debug('CTT KV override saved (cleared) for task @task', ['@task' => $task_uri]);
+      return;
+    }
 
     $this->logger->debug('CTT KV override saved for task @task (instruments=@i)', [
       '@task' => $task_uri,
@@ -342,8 +345,14 @@ class CttHascoClient {
       return NULL;
     }
     $ri = $value['requiredInstrument'] ?? NULL;
-    if (!is_array($ri) || empty($ri)) {
+    if (!is_array($ri)) {
       return NULL;
+    }
+
+    // If the override record exists but the array is empty, treat it as an explicit "cleared" marker.
+    // This ensures the frontend sees instruments as cleared even if hascoapi still has stale values.
+    if (empty($ri)) {
+      return [];
     }
 
     return $ri;
@@ -396,7 +405,15 @@ class CttHascoClient {
   protected function applyTaskInstrumentOverride(array $task, string $task_uri): array {
     $task_uri = $this->normalizeUriForKey($task['uri'] ?? $task['hasURI'] ?? $task_uri);
     $override = $this->loadTaskInstrumentOverride($task_uri);
-    if (!$override) {
+    if ($override === NULL) {
+      return $task;
+    }
+
+    // Explicit cleared override: hide any stale API values.
+    if (is_array($override) && empty($override)) {
+      $task['requiredInstrument'] = [];
+      $task['hasRequiredInstrumentUris'] = [];
+      $this->logger->debug('CTT KV override applied for task @task (cleared)', ['@task' => $task_uri]);
       return $task;
     }
 

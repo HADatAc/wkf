@@ -71,13 +71,6 @@
           var umdGlobal = window.HASCOWorkflowEditor || window.HascoWorkflowEditor || window.hascoWorkflowEditor;
           if (typeof umdGlobal !== 'undefined' &&
               (umdGlobal.mountApp || umdGlobal.mountWorkflowEditor)) {
-            try {
-              console.log('[CTT Editor] UMD global present:', {
-                hasGlobal: typeof umdGlobal !== 'undefined',
-                hasMountApp: typeof umdGlobal.mountApp === 'function',
-                hasMountWorkflowEditor: typeof umdGlobal.mountWorkflowEditor === 'function'
-              });
-            } catch (e) {}
             mountEditor(container);
           } else if (attempt < maxAttempts) {
             setTimeout(waitForEditor, 200);
@@ -131,10 +124,8 @@
     var lib = window.HASCOWorkflowEditor || window.HascoWorkflowEditor || window.hascoWorkflowEditor;
 
     if (typeof lib.mountApp === 'function') {
-      console.log('[CTT Editor] Mounting full App (same as standalone).');
       lib.mountApp(container);
     } else if (typeof lib.mountWorkflowEditor === 'function') {
-      console.warn('[CTT Editor] mountApp not found, falling back to mountWorkflowEditor.');
       lib.mountWorkflowEditor(container, {});
     } else {
       container.innerHTML = '<p style="color:orange;">CTT Editor UMD loaded but no mount function found.</p>';
