@@ -8,10 +8,122 @@
 (function (Drupal, drupalSettings, once) {
   'use strict';
 
+  function toBooleanFlag(value) {
+    if (value === true || value === 1) {
+      return true;
+    }
+    if (typeof value === 'string') {
+      var normalized = value.trim().toLowerCase();
+      return normalized === '1' || normalized === 'true' || normalized === 'yes';
+    }
+    return false;
+  }
+
+  function normalizeControlText(element) {
+    if (!element) {
+      return '';
+    }
+    var text = [
+      element.textContent || '',
+      element.getAttribute && element.getAttribute('aria-label') || '',
+      element.getAttribute && element.getAttribute('title') || ''
+    ].join(' ');
+    return text.replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function isExecutionActionLabel(label) {
+    if (!label) {
+      return false;
+    }
+    return /\b(start simulation|start execution|run simulation|run workflow|run|resume|pause|stop|abort|step|execute|play)\b/.test(label);
+  }
+
+  function hideStartOverlayNearControl(control) {
+    var current = control ? control.parentElement : null;
+    var depth = 0;
+    while (current && depth < 6) {
+      var text = (current.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      var buttonCount = current.querySelectorAll ? current.querySelectorAll('button').length : 0;
+      if (text.indexOf('start simulation') !== -1 && buttonCount > 0 && buttonCount <= 6) {
+        current.setAttribute('data-ctt-hidden-action', '1');
+        current.style.display = 'none';
+        return;
+      }
+      current = current.parentElement;
+      depth++;
+    }
+  }
+
+  function hideExecutionActionControls(root) {
+    if (!root || !root.querySelectorAll) {
+      return;
+    }
+    var controls = root.querySelectorAll('button, [role="button"], a');
+    controls.forEach(function (control) {
+      var label = normalizeControlText(control);
+      if (!isExecutionActionLabel(label)) {
+        return;
+      }
+      control.setAttribute('data-ctt-hidden-action', '1');
+      control.setAttribute('aria-hidden', 'true');
+      control.setAttribute('tabindex', '-1');
+      control.style.pointerEvents = 'none';
+      control.style.display = 'none';
+      if (control.tagName === 'BUTTON') {
+        control.setAttribute('disabled', 'disabled');
+      }
+      hideStartOverlayNearControl(control);
+    });
+  }
+
+  function enableReadOnlyPreview(container) {
+    if (!container || container.__cttReadOnlyPreviewBound) {
+      return;
+    }
+
+    container.__cttReadOnlyPreviewBound = true;
+    container.setAttribute('data-ctt-readonly-preview', '1');
+
+    container.addEventListener('click', function (event) {
+      var target = event.target && event.target.closest
+        ? event.target.closest('button, [role="button"], a')
+        : null;
+      if (!target) {
+        return;
+      }
+      if (isExecutionActionLabel(normalizeControlText(target))) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+      }
+    }, true);
+
+    hideExecutionActionControls(container);
+
+    var observer = new MutationObserver(function () {
+      hideExecutionActionControls(container);
+    });
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true
+    });
+
+    [120, 350, 900, 1600].forEach(function (delay) {
+      setTimeout(function () {
+        hideExecutionActionControls(container);
+      }, delay);
+    });
+  }
+
   Drupal.behaviors.cttEditorInit = {
     attach: function (context) {
       once('ctt-editor-init', '#ctt-workflow-app', context).forEach(function (container) {
         var settings = drupalSettings.ctt || {};
+        var readOnlyPreview = toBooleanFlag(settings.readOnlyPreview) || toBooleanFlag(settings.execution && settings.execution.readOnlyPreview);
         var baseUrl = (drupalSettings.path && drupalSettings.path.baseUrl) || settings.drupalBaseUrl || '/';
         if (!baseUrl.endsWith('/')) {
           baseUrl += '/';
@@ -24,9 +136,16 @@
         drupalSettings.ctt.drupalBaseUrl = settings.drupalBaseUrl;
         drupalSettings.ctt.hascoApiUrl = settings.hascoApiUrl;
         drupalSettings.ctt.apiBaseUrl = settings.apiBaseUrl;
+        drupalSettings.ctt.execution = drupalSettings.ctt.execution || settings.execution || {};
+        drupalSettings.ctt.execution.readOnlyPreview = readOnlyPreview;
+        drupalSettings.ctt.readOnlyPreview = readOnlyPreview;
 
         var maxAttempts = 50;
         var attempt = 0;
+        var configuredMinHeight = parseInt(container.getAttribute('data-ctt-min-height'), 10);
+        var minHeight = (!isNaN(configuredMinHeight) && configuredMinHeight >= 200)
+          ? configuredMinHeight
+          : 420;
 
         // Force full usable viewport for embedded mode.
         container.style.width = '100%';
@@ -52,7 +171,7 @@
             }
           }
 
-          var availableHeight = Math.max(420, Math.floor(footerTop - containerTop));
+          var availableHeight = Math.max(minHeight, Math.floor(footerTop - containerTop));
           container.style.height = availableHeight + 'px';
           container.style.minHeight = availableHeight + 'px';
         }
@@ -71,7 +190,7 @@
           var umdGlobal = window.HASCOWorkflowEditor || window.HascoWorkflowEditor || window.hascoWorkflowEditor;
           if (typeof umdGlobal !== 'undefined' &&
               (umdGlobal.mountApp || umdGlobal.mountWorkflowEditor)) {
-            mountEditor(container);
+            mountEditor(container, readOnlyPreview);
           } else if (attempt < maxAttempts) {
             setTimeout(waitForEditor, 200);
           } else {
@@ -116,7 +235,7 @@
    * reads processUri from drupalSettings and URL params, handles auth, etc.
    * This is the exact same editor that runs in standalone mode.
    */
-  function mountEditor(container) {
+  function mountEditor(container, readOnlyPreview) {
     // Remove loading indicator.
     container.innerHTML = '';
     container.style.overflow = 'hidden';
@@ -125,8 +244,14 @@
 
     if (typeof lib.mountApp === 'function') {
       lib.mountApp(container);
+      if (readOnlyPreview) {
+        enableReadOnlyPreview(container);
+      }
     } else if (typeof lib.mountWorkflowEditor === 'function') {
       lib.mountWorkflowEditor(container, {});
+      if (readOnlyPreview) {
+        enableReadOnlyPreview(container);
+      }
     } else {
       container.innerHTML = '<p style="color:orange;">CTT Editor UMD loaded but no mount function found.</p>';
       console.error('[CTT Editor] No mount function found in UMD bundle.');
