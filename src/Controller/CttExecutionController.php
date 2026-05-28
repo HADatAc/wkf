@@ -324,10 +324,37 @@ class CttExecutionController extends ControllerBase {
     }
   }
 
+  protected function redirectToManageStudyWithError(string $studyuri, string $message): RedirectResponse {
+    $this->messenger()->addError($this->t($message));
+    return $this->redirect('std.manage_study_elements', [
+      'studyuri' => $studyuri,
+    ]);
+  }
+
   public function createExecution(string $studyuri) {
-    $decodedStudyUri = base64_decode($studyuri);
+    $decodedStudyUri = base64_decode($studyuri, TRUE);
     if (empty($decodedStudyUri)) {
-      return new Response('Invalid study URI.', 400);
+      $this->messenger()->addError($this->t('Unable to start execution: invalid study identifier.'));
+      return $this->redirect('std.search_studies_variables');
+    }
+
+    // Security rule: only the study owner/manager can create executions.
+    $currentUserEmail = trim((string) $this->currentUser()->getEmail());
+    if ($currentUserEmail === '') {
+      return $this->redirectToManageStudyWithError($studyuri, 'You do not have permission to create executions for this study.');
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $studyObj = $api->parseObjectResponse($api->getUri($decodedStudyUri), 'getUri');
+      $ownerEmail = is_object($studyObj) ? trim((string) ($studyObj->hasSIRManagerEmail ?? '')) : '';
+
+      if ($ownerEmail === '' || strcasecmp($ownerEmail, $currentUserEmail) !== 0) {
+        return $this->redirectToManageStudyWithError($studyuri, 'You are not allowed to create executions for this study.');
+      }
+    }
+    catch (\Throwable $e) {
+      return $this->redirectToManageStudyWithError($studyuri, 'Unable to validate permission to create this execution.');
     }
 
     // Reset the stored association for this study (useful for testing).
