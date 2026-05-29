@@ -27,6 +27,9 @@ function ctt_install() {
   $role = \Drupal\user\Entity\Role::load('administrator');
   if ($role) {
     $role->grantPermission('access ctt editor');
+    $role->grantPermission('create ctt workflow');
+    $role->grantPermission('edit ctt workflow');
+    $role->grantPermission('submit ctt workflow');
     $role->grantPermission('administer ctt');
     $role->save();
   }

@@ -25,3 +25,27 @@ ctt-editor-init:
     - core/drupal
     - core/drupalSettings
     - core/once
+
+ctt-tools-repository:
+  version: 1.x
+  css:
+    theme:
+      css/ctt-tools-repository.css: {}
+  js:
+    js/ctt-tools-repository.js: {}
+  dependencies:
+    - core/drupal
+    - core/drupalSettings
+    - core/once
+
+ctt-r-analysis:
+  version: 1.x
+  css:
+    theme:
+      css/ctt-r-analysis.css: {}
+  js:
+    js/ctt-r-analysis.js: {}
+  dependencies:
+    - core/drupal
+    - core/drupalSettings
+    - core/once

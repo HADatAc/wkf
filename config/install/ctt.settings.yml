@@ -1,3 +1,5 @@
 hasco_api_url: ''
 jwt_key_id: ''
 disable_ssl_verification: false
+r_analysis_endpoint_path: '/hascoapi/api/r-analysis/execute'
+r_analysis_timeout_seconds: 60

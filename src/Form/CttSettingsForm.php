@@ -64,6 +64,25 @@ class CttSettingsForm extends ConfigFormBase {
       '#default_value' => $config->get('disable_ssl_verification') ?: FALSE,
     ];
 
+    $form['r_analysis_endpoint_path'] = [
+      '#type' => 'textfield',
+      '#title' => $this->t('R analysis endpoint path'),
+      '#description' => $this->t('Relative hascoapi path used for real R execution requests (example: /hascoapi/api/r-analysis/execute).'),
+      '#default_value' => $config->get('r_analysis_endpoint_path') ?: '/hascoapi/api/r-analysis/execute',
+      '#required' => TRUE,
+    ];
+
+    $form['r_analysis_timeout_seconds'] = [
+      '#type' => 'number',
+      '#title' => $this->t('R analysis timeout (seconds)'),
+      '#description' => $this->t('HTTP timeout when calling the backend R execution endpoint.'),
+      '#default_value' => (int) ($config->get('r_analysis_timeout_seconds') ?: 60),
+      '#min' => 5,
+      '#max' => 300,
+      '#step' => 1,
+      '#required' => TRUE,
+    ];
+
     return parent::buildForm($form, $form_state);
   }
 
@@ -71,7 +90,15 @@ class CttSettingsForm extends ConfigFormBase {
    * {@inheritdoc}
    */
   public function validateForm(array &$form, FormStateInterface $form_state) {
-    // No validation needed; API URL is configured in REP.
+    $endpointPath = trim((string) $form_state->getValue('r_analysis_endpoint_path'));
+    if ($endpointPath === '' || !str_starts_with($endpointPath, '/')) {
+      $form_state->setErrorByName('r_analysis_endpoint_path', $this->t('R analysis endpoint path must start with "/".'));
+    }
+
+    $timeout = (int) $form_state->getValue('r_analysis_timeout_seconds');
+    if ($timeout < 5 || $timeout > 300) {
+      $form_state->setErrorByName('r_analysis_timeout_seconds', $this->t('R analysis timeout must be between 5 and 300 seconds.'));
+    }
   }
 
   /**
@@ -81,6 +108,8 @@ class CttSettingsForm extends ConfigFormBase {
     $this->config('ctt.settings')
       ->set('jwt_key_id', $form_state->getValue('jwt_key_id'))
       ->set('disable_ssl_verification', (bool) $form_state->getValue('disable_ssl_verification'))
+      ->set('r_analysis_endpoint_path', trim((string) $form_state->getValue('r_analysis_endpoint_path')))
+      ->set('r_analysis_timeout_seconds', (int) $form_state->getValue('r_analysis_timeout_seconds'))
       ->save();
 
     parent::submitForm($form, $form_state);

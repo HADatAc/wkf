@@ -1,0 +1,46 @@
+.ctt-r-analysis-page {
+  margin: 0;
+}
+
+.ctt-r-analysis-page .ctt-r-intro {
+  margin-bottom: 0.5rem;
+}
+
+.ctt-r-analysis-page #ctt-r-no-mock-note {
+  margin-bottom: 0.75rem;
+}
+
+.ctt-r-analysis-page .ctt-r-context-summary {
+  font-size: 0.95rem;
+}
+
+.ctt-r-analysis-page .ctt-r-context-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.ctt-r-analysis-page .ctt-r-context-list li {
+  margin-bottom: 0.45rem;
+}
+
+.ctt-r-analysis-page .ctt-r-uri-preview {
+  margin-top: 0.15rem;
+  color: #4b5563;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.ctt-r-analysis-page .ctt-r-response-output {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  background: #0f172a;
+  color: #dbeafe;
+  border: 1px solid #1e293b;
+  border-radius: 0.4rem;
+  padding: 0.75rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

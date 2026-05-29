@@ -8,3 +8,9 @@ ctt.settings:
     disable_ssl_verification:
       type: boolean
       label: 'Disable SSL verification'
+    r_analysis_endpoint_path:
+      type: string
+      label: 'R analysis endpoint path'
+    r_analysis_timeout_seconds:
+      type: integer
+      label: 'R analysis timeout in seconds'

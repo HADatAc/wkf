@@ -19,6 +19,202 @@
     return false;
   }
 
+  function parseUrl(urlValue) {
+    if (!urlValue || typeof URL !== 'function') {
+      return null;
+    }
+    try {
+      return new URL(String(urlValue), window.location.origin);
+    }
+    catch (e) {
+      return null;
+    }
+  }
+
+  function normalizePathname(urlValue) {
+    var parsed = parseUrl(urlValue);
+    if (!parsed) {
+      return '';
+    }
+    return String(parsed.pathname || '').replace(/\/+$/, '').toLowerCase();
+  }
+
+  function getRequestUrl(resource) {
+    if (typeof resource === 'string') {
+      return resource;
+    }
+    if (resource && typeof resource.url === 'string') {
+      return resource.url;
+    }
+    return '';
+  }
+
+  function parseRequestContext(requestUrl, init) {
+    var context = {
+      studyUri: '',
+      processUri: '',
+      requestedStatus: '',
+      currentStatus: '',
+      mode: ''
+    };
+
+    var parsed = parseUrl(requestUrl);
+    if (parsed) {
+      context.studyUri = String(parsed.searchParams.get('studyUri') || '').trim();
+      context.processUri = String(parsed.searchParams.get('processUri') || '').trim();
+      context.requestedStatus = String(parsed.searchParams.get('requestedStatus') || '').trim();
+      context.currentStatus = String(parsed.searchParams.get('currentStatus') || '').trim();
+      context.mode = String(parsed.searchParams.get('mode') || '').trim();
+    }
+
+    if (!init || typeof init.body !== 'string' || init.body.trim() === '') {
+      return context;
+    }
+
+    try {
+      var body = JSON.parse(init.body);
+      if (body && typeof body === 'object') {
+        context.studyUri = context.studyUri || String(body.studyUri || '').trim();
+        context.processUri = context.processUri || String(body.processUri || '').trim();
+        context.requestedStatus = context.requestedStatus || String(body.requestedStatus || '').trim();
+        context.currentStatus = context.currentStatus || String(body.currentStatus || '').trim();
+        context.mode = context.mode || String(body.mode || '').trim();
+      }
+    }
+    catch (e) {
+      // Ignore malformed payloads and fall back to query params.
+    }
+
+    return context;
+  }
+
+  function installSubmissionStatusBridge(settings) {
+    if (!settings || !settings.submission || !toBooleanFlag(settings.submission.enabled)) {
+      return;
+    }
+    if (typeof window.fetch !== 'function') {
+      return;
+    }
+    if (window.__cttSubmissionStatusBridgeInstalled) {
+      return;
+    }
+
+    var validationEndpoint = String(settings.submission.validationEndpoint || '').trim();
+    var statusEndpoint = String(settings.submission.statusEndpoint || '').trim();
+    var validationPath = normalizePathname(validationEndpoint);
+    if (!validationPath || !statusEndpoint) {
+      return;
+    }
+
+    window.__cttSubmissionStatusBridgeInstalled = true;
+
+    var originalFetch = window.fetch.bind(window);
+
+    function persistEditorialStatus(context, validationPayload) {
+      var normalized = validationPayload && validationPayload.normalized && typeof validationPayload.normalized === 'object'
+        ? validationPayload.normalized
+        : {};
+
+      var studyUri = context.studyUri || String(normalized.studyUri || settings.studyUri || '').trim();
+      var processUri = context.processUri || String(normalized.processUri || settings.processUri || '').trim();
+      var requestedStatus = String(context.requestedStatus || normalized.requestedStatus || settings.editorial && settings.editorial.defaultState || '').trim().toLowerCase();
+      var currentStatus = String(context.currentStatus || normalized.currentStatus || settings.editorial && settings.editorial.currentStatus || 'draft').trim().toLowerCase();
+      var mode = String(context.mode || normalized.mode || settings.submission && settings.submission.mode || '').trim().toLowerCase();
+
+      if (!studyUri || !processUri || !requestedStatus) {
+        return;
+      }
+      if (mode && mode !== 'submission' && mode !== 'structured') {
+        return;
+      }
+
+      var persistKey = [studyUri, processUri, currentStatus, requestedStatus].join('|');
+      if (window.__cttSubmissionStatusLastKey === persistKey) {
+        return;
+      }
+      window.__cttSubmissionStatusLastKey = persistKey;
+
+      originalFetch(statusEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          studyUri: studyUri,
+          processUri: processUri,
+          currentStatus: currentStatus,
+          requestedStatus: requestedStatus
+        })
+      }).then(function (response) {
+        return response.json().catch(function () {
+          return null;
+        });
+      }).then(function (payload) {
+        if (!payload || payload.isValid !== true) {
+          return;
+        }
+
+        var status = String(payload.status || requestedStatus || '').trim().toLowerCase();
+        if (status) {
+          settings.editorial = settings.editorial || {};
+          settings.editorial.currentStatus = status;
+          drupalSettings.ctt = drupalSettings.ctt || {};
+          drupalSettings.ctt.editorial = drupalSettings.ctt.editorial || {};
+          drupalSettings.ctt.editorial.currentStatus = status;
+        }
+
+        window.__cttSubmissionStatusLastPersist = {
+          key: persistKey,
+          status: status,
+          updated: payload.updated === true,
+          issues: Array.isArray(payload.issues) ? payload.issues : []
+        };
+
+        if (typeof window.CustomEvent === 'function') {
+          window.dispatchEvent(new CustomEvent('ctt:submission-status-persisted', {
+            detail: window.__cttSubmissionStatusLastPersist
+          }));
+        }
+      }).catch(function (error) {
+        window.__cttSubmissionStatusLastPersistError = String(error && error.message ? error.message : error);
+      });
+    }
+
+    window.fetch = function (resource, init) {
+      var requestUrl = getRequestUrl(resource);
+      var requestPath = normalizePathname(requestUrl);
+      var context = parseRequestContext(requestUrl, init);
+
+      var requestPromise = originalFetch(resource, init);
+      if (!requestPath || requestPath !== validationPath) {
+        return requestPromise;
+      }
+
+      return requestPromise.then(function (response) {
+        var cloned = null;
+        try {
+          cloned = response.clone();
+        }
+        catch (e) {
+          return response;
+        }
+
+        cloned.json().then(function (payload) {
+          if (!payload || payload.isValid !== true) {
+            return;
+          }
+          persistEditorialStatus(context, payload);
+        }).catch(function () {
+          // Ignore non-JSON responses.
+        });
+
+        return response;
+      });
+    };
+  }
+
   function normalizeControlText(element) {
     if (!element) {
       return '';
@@ -139,6 +335,8 @@
         drupalSettings.ctt.execution = drupalSettings.ctt.execution || settings.execution || {};
         drupalSettings.ctt.execution.readOnlyPreview = readOnlyPreview;
         drupalSettings.ctt.readOnlyPreview = readOnlyPreview;
+
+        installSubmissionStatusBridge(settings);
 
         var maxAttempts = 50;
         var attempt = 0;

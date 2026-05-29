@@ -1,6 +1,19 @@
 access ctt editor:
   title: 'Access CTT Workflow Editor'
   description: 'Use the visual workflow editor to create and manage CTT processes.'
+
+create ctt workflow:
+  title: 'Create CTT workflows'
+  description: 'Create new structured workflow/scenario processes in the CTT editor.'
+
+edit ctt workflow:
+  title: 'Edit CTT workflows'
+  description: 'Edit existing CTT workflows, including tasks and version history.'
+
+submit ctt workflow:
+  title: 'Submit CTT workflow runs'
+  description: 'Start structured submission flows and persist execution outputs.'
+
 administer ctt:
   title: 'Administer CTT Editor'
   description: 'Configure CTT editor settings, API connection, and manage editor preferences.'
