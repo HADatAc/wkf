@@ -35,6 +35,8 @@ final class CttSubmissionValidationApiTest extends BrowserTestBase {
 
     $accessOnly = $this->createUser(['access ctt editor']);
     $submitter = $this->createUser(['submit ctt workflow']);
+    $nonOwnerSubmitter = $this->createUser(['submit ctt workflow']);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $submitter->getEmail());
 
     $this->drupalLogin($accessOnly);
     $this->drupalGet('/workflow/api/submission/validate', [
@@ -44,6 +46,24 @@ final class CttSubmissionValidationApiTest extends BrowserTestBase {
       ],
     ]);
     $this->assertSession()->statusCodeEquals(403);
+
+    $this->drupalLogin($nonOwnerSubmitter);
+    $this->drupalGet('/workflow/api/submission/validate', [
+      'query' => [
+        'studyUri' => $studyUri,
+        'processUri' => $processUri,
+        'requestedStatus' => 'under review',
+        'mode' => 'submission',
+        'dataFileUri' => 'http://example.org/datafile/validation-api-output',
+      ],
+    ]);
+    $this->assertSession()->statusCodeEquals(403);
+
+    $nonOwnerPayload = Json::decode($this->getSession()->getPage()->getContent());
+    $this->assertIsArray($nonOwnerPayload);
+    $this->assertFalse((bool) ($nonOwnerPayload['isValid'] ?? TRUE));
+    $nonOwnerCodes = $this->extractIssueCodes($nonOwnerPayload['issues'] ?? []);
+    $this->assertContains('workflow_owner_required', $nonOwnerCodes);
 
     $this->drupalLogin($submitter);
     $this->drupalGet('/workflow/api/submission/validate', [
@@ -106,6 +126,7 @@ final class CttSubmissionValidationApiTest extends BrowserTestBase {
 
     $warningStudyUri = 'http://example.org/study/validation-warning';
     $warningProcessUri = 'http://example.org/workflow/validation-warning';
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($warningStudyUri), (string) $submitter->getEmail());
 
     $this->drupalGet('/workflow/api/submission/validate', [
       'query' => [
@@ -128,6 +149,7 @@ final class CttSubmissionValidationApiTest extends BrowserTestBase {
     $studyUri = 'http://example.org/study/validation-transition';
     $processUri = 'http://example.org/workflow/validation-transition';
     \Drupal::state()->set('ctt.study_process.' . sha1($studyUri), $processUri);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $submitter->getEmail());
 
     $this->drupalGet('/workflow/api/submission/validate', [
       'query' => [

@@ -37,6 +37,8 @@ final class CttSubmissionAssociationsApiTest extends BrowserTestBase {
 
     $accessOnly = $this->createUser(['access ctt editor']);
     $submitter = $this->createUser(['submit ctt workflow']);
+    $nonOwnerSubmitter = $this->createUser(['submit ctt workflow']);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $submitter->getEmail());
 
     $this->drupalLogin($accessOnly);
     $this->drupalGet('/workflow/api/submission/associations', [
@@ -62,6 +64,23 @@ final class CttSubmissionAssociationsApiTest extends BrowserTestBase {
     $this->assertSame(0, (int) ($initialPayload['associations']['counts']['datasets'] ?? -1));
     $this->assertSame(0, (int) ($initialPayload['associations']['counts']['variables'] ?? -1));
     $this->assertSame(0, (int) ($initialPayload['associations']['counts']['images'] ?? -1));
+
+    $this->drupalLogin($nonOwnerSubmitter);
+    $this->drupalGet('/workflow/api/submission/associations', [
+      'query' => [
+        'studyUri' => $studyUri,
+        'datasetUris' => ['http://example.org/dataset/blocked'],
+      ],
+    ]);
+    $this->assertSession()->statusCodeEquals(403);
+
+    $blockedPayload = Json::decode($this->getSession()->getPage()->getContent());
+    $this->assertIsArray($blockedPayload);
+    $this->assertFalse((bool) ($blockedPayload['isValid'] ?? TRUE));
+    $blockedCodes = $this->extractIssueCodes($blockedPayload['issues'] ?? []);
+    $this->assertContains('workflow_owner_required', $blockedCodes);
+
+    $this->drupalLogin($submitter);
 
     $this->drupalGet('/workflow/api/submission/associations', [
       'query' => [

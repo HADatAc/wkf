@@ -37,7 +37,9 @@ final class CttSubmissionStatusPersistenceApiTest extends BrowserTestBase {
 
     $accessOnly = $this->createUser(['access ctt editor']);
     $submitter = $this->createUser(['submit ctt workflow']);
+    $nonOwnerSubmitter = $this->createUser(['submit ctt workflow']);
     $admin = $this->createUser(['submit ctt workflow', 'administer ctt']);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $submitter->getEmail());
 
     $this->drupalLogin($accessOnly);
     $this->drupalGet('/workflow/api/submission/status', [
@@ -61,6 +63,25 @@ final class CttSubmissionStatusPersistenceApiTest extends BrowserTestBase {
     $this->assertFalse((bool) ($initialPayload['updated'] ?? TRUE));
     $this->assertSame('draft', (string) ($initialPayload['status'] ?? ''));
     $this->assertContains('under review', $initialPayload['editorial']['allowedNextStatuses'] ?? []);
+
+    $this->drupalLogin($nonOwnerSubmitter);
+    $this->drupalGet('/workflow/api/submission/status', [
+      'query' => [
+        'studyUri' => $studyUri,
+        'processUri' => $processUri,
+        'currentStatus' => 'draft',
+        'requestedStatus' => 'under review',
+      ],
+    ]);
+    $this->assertSession()->statusCodeEquals(403);
+
+    $blockedPayload = Json::decode($this->getSession()->getPage()->getContent());
+    $this->assertIsArray($blockedPayload);
+    $this->assertFalse((bool) ($blockedPayload['isValid'] ?? TRUE));
+    $blockedCodes = $this->extractIssueCodes($blockedPayload['issues'] ?? []);
+    $this->assertContains('workflow_owner_required', $blockedCodes);
+
+    $this->drupalLogin($submitter);
 
     $this->drupalGet('/workflow/api/submission/status', [
       'query' => [
@@ -122,6 +143,8 @@ final class CttSubmissionStatusPersistenceApiTest extends BrowserTestBase {
     $this->assertFalse((bool) ($blockedCurrentPayload['isValid'] ?? TRUE));
     $blockedCurrentCodes = $this->extractIssueCodes($blockedCurrentPayload['issues'] ?? []);
     $this->assertContains('current_requires_admin', $blockedCurrentCodes);
+
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $admin->getEmail());
 
     $this->drupalLogin($admin);
     $this->drupalGet('/workflow/api/submission/status', [
