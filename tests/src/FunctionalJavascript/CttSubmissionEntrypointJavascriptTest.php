@@ -36,6 +36,7 @@ final class CttSubmissionEntrypointJavascriptTest extends WebDriverTestBase {
     \Drupal::state()->set('ctt.study_process.' . sha1($studyUri), $processUri);
 
     $account = $this->createUser(['access ctt editor', 'submit ctt workflow']);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $account->getEmail());
     $this->drupalLogin($account);
 
     $this->drupalGet('/ctt/submission/' . $studyParam);
@@ -73,11 +74,45 @@ final class CttSubmissionEntrypointJavascriptTest extends WebDriverTestBase {
       . " && drupalSettings.ctt.editorial.currentStatus === 'draft'"
       . " && drupalSettings.ctt.editorial.defaultState === 'under review'"
       . " && drupalSettings.ctt.permissions"
-      . " && drupalSettings.ctt.permissions.canSubmitWorkflow === true";
+      . " && drupalSettings.ctt.permissions.canSubmitWorkflow === true"
+      . " && drupalSettings.ctt.readOnlyPreview === false"
+      . " && drupalSettings.ctt.workflowAccess"
+      . " && drupalSettings.ctt.workflowAccess.isWorkflowOwnerAuthenticated === true";
 
     $this->assertTrue(
       (bool) $this->getSession()->wait(10000, $settingsCondition),
       'Timed out waiting for structured submission context in drupalSettings.ctt.'
+    );
+  }
+
+  public function testSubmissionEntrypointNonOwnerIsReadOnly(): void {
+    $studyUri = 'http://example.org/study/submission-js-readonly';
+    $studyParam = rawurlencode(base64_encode($studyUri));
+    $processUri = 'http://example.org/workflow/submission-js-readonly-process';
+
+    \Drupal::state()->set('ctt.study_process.' . sha1($studyUri), $processUri);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), 'owner@example.org');
+
+    $account = $this->createUser(['access ctt editor', 'submit ctt workflow']);
+    $this->drupalLogin($account);
+
+    $this->drupalGet('/ctt/submission/' . $studyParam);
+    $this->assertSession()->elementExists('css', '#ctt-workflow-app');
+
+    $settingsCondition = "typeof drupalSettings !== 'undefined'"
+      . " && drupalSettings.ctt"
+      . " && drupalSettings.ctt.mode === 'submission'"
+      . " && drupalSettings.ctt.readOnlyPreview === true"
+      . " && drupalSettings.ctt.permissions"
+      . " && drupalSettings.ctt.permissions.canSubmitWorkflow === false"
+      . " && drupalSettings.ctt.permissions.canEditWorkflow === false"
+      . " && drupalSettings.ctt.workflowAccess"
+      . " && drupalSettings.ctt.workflowAccess.isStudyContext === true"
+      . " && drupalSettings.ctt.workflowAccess.isWorkflowOwnerAuthenticated === false";
+
+    $this->assertTrue(
+      (bool) $this->getSession()->wait(10000, $settingsCondition),
+      'Timed out waiting for non-owner read-only submission context in drupalSettings.ctt.'
     );
   }
 

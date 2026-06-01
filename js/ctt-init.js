@@ -272,34 +272,121 @@
     });
   }
 
-  function enableReadOnlyPreview(container) {
+  function blockReadOnlyEvent(event) {
+    if (!event) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === 'function') {
+      event.stopImmediatePropagation();
+    }
+  }
+
+  function disableInteractiveControls(root) {
+    if (!root || !root.querySelectorAll) {
+      return;
+    }
+
+    var controls = root.querySelectorAll('button, [role="button"], a, input, select, textarea, [contenteditable="true"], [tabindex]');
+    controls.forEach(function (control) {
+      control.setAttribute('data-ctt-readonly-control', '1');
+      control.setAttribute('tabindex', '-1');
+      control.style.pointerEvents = 'none';
+
+      if (control.tagName === 'BUTTON' || control.tagName === 'INPUT' || control.tagName === 'SELECT' || control.tagName === 'TEXTAREA') {
+        control.setAttribute('disabled', 'disabled');
+      }
+
+      if (control.tagName === 'A') {
+        control.setAttribute('aria-disabled', 'true');
+      }
+    });
+  }
+
+  function getReadOnlyMessage(settings) {
+    var workflowAccess = settings && settings.workflowAccess ? settings.workflowAccess : {};
+    var message = String(workflowAccess.message || '').trim();
+    if (message !== '') {
+      return message;
+    }
+    return 'Read-only workflow preview: only the authenticated workflow owner can edit, save, or start/stop actions for this study.';
+  }
+
+  function ensureReadOnlyNotice(container, settings) {
+    if (!container || !container.parentNode) {
+      return;
+    }
+
+    var existing = container.parentNode.querySelector('.ctt-readonly-banner');
+    if (existing) {
+      return;
+    }
+
+    var banner = document.createElement('div');
+    banner.className = 'ctt-readonly-banner';
+    banner.setAttribute('role', 'status');
+    banner.textContent = getReadOnlyMessage(settings);
+    container.parentNode.insertBefore(banner, container);
+  }
+
+  function enableReadOnlyPreview(container, settings) {
     if (!container || container.__cttReadOnlyPreviewBound) {
       return;
     }
 
     container.__cttReadOnlyPreviewBound = true;
     container.setAttribute('data-ctt-readonly-preview', '1');
+    container.setAttribute('aria-readonly', 'true');
 
-    container.addEventListener('click', function (event) {
-      var target = event.target && event.target.closest
-        ? event.target.closest('button, [role="button"], a')
-        : null;
-      if (!target) {
-        return;
+    var workflowAccess = settings && settings.workflowAccess ? settings.workflowAccess : {};
+    var reasonCode = String(workflowAccess.reasonCode || '').trim();
+    if (reasonCode !== '') {
+      container.setAttribute('data-ctt-readonly-reason', reasonCode);
+    }
+
+    if ('inert' in container) {
+      container.inert = true;
+    }
+    else {
+      container.setAttribute('inert', '');
+    }
+
+    ensureReadOnlyNotice(container, settings);
+
+    [
+      'click',
+      'dblclick',
+      'mousedown',
+      'mouseup',
+      'pointerdown',
+      'pointerup',
+      'touchstart',
+      'touchend',
+      'dragstart',
+      'drop',
+      'submit',
+      'contextmenu',
+    ].forEach(function (eventName) {
+      container.addEventListener(eventName, blockReadOnlyEvent, true);
+    });
+
+    var keyBlocker = function (event) {
+      if (event && event.target && container.contains(event.target)) {
+        blockReadOnlyEvent(event);
       }
-      if (isExecutionActionLabel(normalizeControlText(target))) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (typeof event.stopImmediatePropagation === 'function') {
-          event.stopImmediatePropagation();
-        }
-      }
-    }, true);
+    };
+
+    document.addEventListener('keydown', keyBlocker, true);
+    document.addEventListener('keyup', keyBlocker, true);
+    container.__cttReadOnlyKeyBlocker = keyBlocker;
 
     hideExecutionActionControls(container);
+    disableInteractiveControls(container);
 
     var observer = new MutationObserver(function () {
       hideExecutionActionControls(container);
+      disableInteractiveControls(container);
     });
     observer.observe(container, {
       childList: true,
@@ -311,6 +398,7 @@
     [120, 350, 900, 1600].forEach(function (delay) {
       setTimeout(function () {
         hideExecutionActionControls(container);
+        disableInteractiveControls(container);
       }, delay);
     });
   }
@@ -319,7 +407,13 @@
     attach: function (context) {
       once('ctt-editor-init', '#ctt-workflow-app', context).forEach(function (container) {
         var settings = drupalSettings.ctt || {};
-        var readOnlyPreview = toBooleanFlag(settings.readOnlyPreview) || toBooleanFlag(settings.execution && settings.execution.readOnlyPreview);
+        var workflowAccess = settings.workflowAccess || {};
+        var readOnlyPreview = toBooleanFlag(settings.readOnlyPreview)
+          || toBooleanFlag(settings.execution && settings.execution.readOnlyPreview)
+          || (toBooleanFlag(workflowAccess.isStudyContext) && !toBooleanFlag(workflowAccess.isWorkflowOwnerAuthenticated));
+
+        settings.workflowAccess = workflowAccess;
+        settings.workflowAccess.readOnlyPreview = readOnlyPreview;
         var baseUrl = (drupalSettings.path && drupalSettings.path.baseUrl) || settings.drupalBaseUrl || '/';
         if (!baseUrl.endsWith('/')) {
           baseUrl += '/';
@@ -335,6 +429,8 @@
         drupalSettings.ctt.execution = drupalSettings.ctt.execution || settings.execution || {};
         drupalSettings.ctt.execution.readOnlyPreview = readOnlyPreview;
         drupalSettings.ctt.readOnlyPreview = readOnlyPreview;
+        drupalSettings.ctt.workflowAccess = drupalSettings.ctt.workflowAccess || settings.workflowAccess || {};
+        drupalSettings.ctt.workflowAccess.readOnlyPreview = readOnlyPreview;
 
         installSubmissionStatusBridge(settings);
 
@@ -388,7 +484,7 @@
           var umdGlobal = window.HASCOWorkflowEditor || window.HascoWorkflowEditor || window.hascoWorkflowEditor;
           if (typeof umdGlobal !== 'undefined' &&
               (umdGlobal.mountApp || umdGlobal.mountWorkflowEditor)) {
-            mountEditor(container, readOnlyPreview);
+            mountEditor(container, readOnlyPreview, settings);
           } else if (attempt < maxAttempts) {
             setTimeout(waitForEditor, 200);
           } else {
@@ -433,7 +529,7 @@
    * reads processUri from drupalSettings and URL params, handles auth, etc.
    * This is the exact same editor that runs in standalone mode.
    */
-  function mountEditor(container, readOnlyPreview) {
+  function mountEditor(container, readOnlyPreview, settings) {
     // Remove loading indicator.
     container.innerHTML = '';
     container.style.overflow = 'hidden';
@@ -443,12 +539,12 @@
     if (typeof lib.mountApp === 'function') {
       lib.mountApp(container);
       if (readOnlyPreview) {
-        enableReadOnlyPreview(container);
+        enableReadOnlyPreview(container, settings);
       }
     } else if (typeof lib.mountWorkflowEditor === 'function') {
       lib.mountWorkflowEditor(container, {});
       if (readOnlyPreview) {
-        enableReadOnlyPreview(container);
+        enableReadOnlyPreview(container, settings);
       }
     } else {
       container.innerHTML = '<p style="color:orange;">CTT Editor UMD loaded but no mount function found.</p>';

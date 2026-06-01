@@ -44,6 +44,12 @@ final class CttToolsRepositoryJavascriptTest extends WebDriverTestBase {
     $this->assertSession()->elementExists('css', '#ctt-tools-repository-page');
     $this->assertSession()->pageTextContains('Metadata-only registry: scripts are never executed in Drupal from this repository.');
     $this->assertSession()->pageTextContains('Create / Edit Tool');
+    $this->assertSession()->elementExists('css', '#ctt-tools-filter-form');
+    $this->assertSession()->elementExists('css', '#ctt-tools-filter-q');
+    $this->assertSession()->elementExists('css', '#ctt-tools-editor-form');
+    $this->assertSession()->elementExists('css', '#ctt-tool-name');
+    $this->assertSession()->elementExists('css', '#ctt-tool-language');
+    $this->assertSession()->elementExists('css', '#ctt-tool-description');
 
     $studyJs = json_encode($studyUri, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     $settingsCondition = "typeof drupalSettings !== 'undefined'"

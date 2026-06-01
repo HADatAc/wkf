@@ -8,6 +8,7 @@ use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Session\AccountProxyInterface;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Drupal\Component\Utility\Html;
+use Drupal\Core\Render\Markup;
 
 /**
  * Controller that renders the CTT Workflow Editor page.
@@ -60,6 +61,96 @@ class CttEditorController extends ControllerBase {
   protected function isTruthyFlag(string $value): bool {
     $normalized = strtolower(trim($value));
     return $normalized === '1' || $normalized === 'true' || $normalized === 'yes';
+  }
+
+  /**
+   * Resolve study manager email for ownership checks.
+   */
+  protected function resolveStudyManagerEmail(string $studyUri): string {
+    $normalizedStudyUri = trim($studyUri);
+    if ($normalizedStudyUri === '') {
+      return '';
+    }
+
+    $ownerStateKey = 'ctt.study_owner_email.' . sha1($normalizedStudyUri);
+    $cachedOwner = \Drupal::state()->get($ownerStateKey);
+    if (is_string($cachedOwner) && trim($cachedOwner) !== '') {
+      return trim($cachedOwner);
+    }
+
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return '';
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $studyObj = $api->parseObjectResponse($api->getUri($normalizedStudyUri), 'getUri');
+
+      $ownerEmail = '';
+      if (is_object($studyObj)) {
+        $ownerEmail = trim((string) ($studyObj->hasSIRManagerEmail ?? $studyObj->managerEmail ?? ''));
+      }
+      elseif (is_array($studyObj)) {
+        $ownerEmail = trim((string) ($studyObj['hasSIRManagerEmail'] ?? $studyObj['managerEmail'] ?? ''));
+      }
+
+      if ($ownerEmail !== '') {
+        \Drupal::state()->set($ownerStateKey, $ownerEmail);
+      }
+
+      return $ownerEmail;
+    }
+    catch (\Throwable $ignored) {
+      return '';
+    }
+  }
+
+  /**
+   * Build effective workflow access context for study-linked editor views.
+   */
+  protected function buildWorkflowAccessContext(?string $studyUri, string $currentUserEmail, bool $isExecutionMode): array {
+    $normalizedStudyUri = is_string($studyUri) ? trim($studyUri) : '';
+    $normalizedCurrentUserEmail = trim($currentUserEmail);
+
+    $isStudyContext = $normalizedStudyUri !== '';
+    $ownerEmail = '';
+    $hasResolvedStudyOwner = FALSE;
+    $isWorkflowOwnerAuthenticated = TRUE;
+    $reasonCode = 'editable';
+
+    if ($isStudyContext) {
+      $ownerEmail = $this->resolveStudyManagerEmail($normalizedStudyUri);
+      $hasResolvedStudyOwner = $ownerEmail !== '';
+      $isWorkflowOwnerAuthenticated = $hasResolvedStudyOwner
+        && $normalizedCurrentUserEmail !== ''
+        && strcasecmp($ownerEmail, $normalizedCurrentUserEmail) === 0;
+
+      if (!$isWorkflowOwnerAuthenticated) {
+        $reasonCode = $hasResolvedStudyOwner ? 'non_owner_study_context' : 'study_owner_unresolved';
+      }
+    }
+
+    $readOnlyPreview = $isExecutionMode || ($isStudyContext && !$isWorkflowOwnerAuthenticated);
+    if ($isExecutionMode) {
+      $reasonCode = 'execution_mode';
+    }
+
+    $message = '';
+    if ($reasonCode === 'execution_mode') {
+      $message = (string) $this->t('Execution mode is read-only.');
+    }
+    elseif ($readOnlyPreview) {
+      $message = (string) $this->t('Read-only workflow preview: only the authenticated workflow owner can edit, save, or start/stop actions for this study.');
+    }
+
+    return [
+      'isStudyContext' => $isStudyContext,
+      'hasResolvedStudyOwner' => $hasResolvedStudyOwner,
+      'isWorkflowOwnerAuthenticated' => $isWorkflowOwnerAuthenticated,
+      'readOnlyPreview' => $readOnlyPreview,
+      'reasonCode' => $reasonCode,
+      'message' => $message,
+    ];
   }
 
   /**
@@ -182,6 +273,11 @@ class CttEditorController extends ControllerBase {
       . '          <label for="ctt-tools-filter-language" class="form-label">' . Html::escape((string) $this->t('Language')) . '</label>'
       . '          <select id="ctt-tools-filter-language" class="form-select">'
       . '            <option value="">All languages</option>'
+      . '            <option value="R">R</option>'
+      . '            <option value="Python">Python</option>'
+      . '            <option value="Julia">Julia</option>'
+      . '            <option value="SAS">SAS</option>'
+      . '            <option value="MATLAB">MATLAB</option>'
       . '          </select>'
       . '        </div>'
       . '        <div class="col-md-2">'
@@ -320,7 +416,7 @@ class CttEditorController extends ControllerBase {
 
     return [
       '#type' => 'markup',
-      '#markup' => $markup,
+      '#markup' => Markup::create($markup),
       '#attached' => [
         'library' => [
           'ctt/ctt-tools-repository',
@@ -387,9 +483,30 @@ class CttEditorController extends ControllerBase {
       . '          <label for="ctt-r-arguments-json" class="form-label">' . Html::escape((string) $this->t('Arguments (JSON object)')) . '</label>'
       . '          <textarea id="ctt-r-arguments-json" class="form-control" rows="5" placeholder="{&#10;  &quot;alpha&quot;: 0.05,&#10;  &quot;iterations&quot;: 1000&#10;}"></textarea>'
       . '        </div>'
-      . '        <div class="col-12 d-flex gap-2">'
+      . '        <div class="col-md-8">'
+      . '          <label for="ctt-r-argument-template" class="form-label">' . Html::escape((string) $this->t('Argument Template (clinical presets)')) . '</label>'
+      . '          <select id="ctt-r-argument-template" class="form-select">'
+      . '            <option value="">' . Html::escape((string) $this->t('Select a template')) . '</option>'
+      . '            <option value="aspiration-baseline">' . Html::escape((string) $this->t('Aspiration baseline check')) . '</option>'
+      . '            <option value="aspiration-high-risk">' . Html::escape((string) $this->t('Aspiration high-risk patient')) . '</option>'
+      . '            <option value="aspiration-followup">' . Html::escape((string) $this->t('Aspiration follow-up reassessment')) . '</option>'
+      . '          </select>'
+      . '        </div>'
+      . '        <div class="col-md-4 d-flex align-items-end ctt-r-template-actions">'
+      . '          <button type="button" id="ctt-r-apply-template" class="btn btn-outline-info btn-sm w-100">' . Html::escape((string) $this->t('Apply Template')) . '</button>'
+      . '        </div>'
+      . '        <div class="col-12">'
+      . '          <div class="form-check ctt-r-validate-check">'
+      . '            <input class="form-check-input" type="checkbox" id="ctt-r-validate-only" checked>'
+      . '            <label class="form-check-label" for="ctt-r-validate-only">' . Html::escape((string) $this->t('Validate only (skip upstream execution)')) . '</label>'
+      . '          </div>'
+      . '          <div class="ctt-r-persistence-note text-muted">' . Html::escape((string) $this->t('Form context is saved in this browser to speed up repeated tests.')) . '</div>'
+      . '        </div>'
+      . '        <div class="col-12 d-flex flex-wrap gap-2">'
       . '          <button type="button" id="ctt-r-load-context" class="btn btn-outline-primary btn-sm">' . Html::escape((string) $this->t('Load Real Context')) . '</button>'
       . '          <button type="submit" id="ctt-r-run-analysis" class="btn btn-success btn-sm">' . Html::escape((string) $this->t('Run R Analysis')) . '</button>'
+      . '          <button type="button" id="ctt-r-copy-payload" class="btn btn-outline-secondary btn-sm">' . Html::escape((string) $this->t('Copy Request Payload')) . '</button>'
+      . '          <button type="button" id="ctt-r-clear-saved-context" class="btn btn-outline-danger btn-sm">' . Html::escape((string) $this->t('Clear Saved Context')) . '</button>'
       . '        </div>'
       . '      </form>'
       . '    </div>'
@@ -403,6 +520,7 @@ class CttEditorController extends ControllerBase {
       . '  <section class="card">'
       . '    <div class="card-header"><strong>' . Html::escape((string) $this->t('Execution Response')) . '</strong></div>'
       . '    <div class="card-body">'
+      . '      <div id="ctt-r-exec-diagnostics" class="ctt-r-diagnostics ctt-r-diagnostics-muted">' . Html::escape((string) $this->t('Run validation or execution to view diagnostics summary.')) . '</div>'
       . '      <pre id="ctt-r-response-output" class="ctt-r-response-output">' . Html::escape((string) $this->t('No execution yet.')) . '</pre>'
       . '    </div>'
       . '  </section>'
@@ -411,7 +529,7 @@ class CttEditorController extends ControllerBase {
 
     return [
       '#type' => 'markup',
-      '#markup' => $markup,
+      '#markup' => Markup::create($markup),
       '#attached' => [
         'library' => [
           'ctt/ctt-r-analysis',
@@ -540,12 +658,21 @@ class CttEditorController extends ControllerBase {
     }
 
     $canAdminister = $account->hasPermission('administer ctt');
+    $workflowAccess = $this->buildWorkflowAccessContext($study_uri, $email, $isExecutionMode);
+
     $permissionMatrix = [
       'canCreateWorkflow' => $canAdminister || $account->hasPermission('create ctt workflow'),
       'canEditWorkflow' => $canAdminister || $account->hasPermission('edit ctt workflow'),
       'canSubmitWorkflow' => $canAdminister || $account->hasPermission('submit ctt workflow'),
       'canAdminister' => $canAdminister,
     ];
+
+    if (!empty($workflowAccess['readOnlyPreview'])) {
+      $permissionMatrix['canCreateWorkflow'] = FALSE;
+      $permissionMatrix['canEditWorkflow'] = FALSE;
+      $permissionMatrix['canSubmitWorkflow'] = FALSE;
+      $permissionMatrix['canAdminister'] = FALSE;
+    }
 
     $editorialStates = $this->getEditorialStates();
     $editorialTransitions = $this->getEditorialTransitions();
@@ -587,9 +714,11 @@ class CttEditorController extends ControllerBase {
       'defaultNamespaceUrl' => $default_namespace_url,
       'csrfToken' => $csrf_token,
       'mode' => $editorMode,
+      'readOnlyPreview' => !empty($workflowAccess['readOnlyPreview']),
       'processUri' => $resolvedProcessUri,
       'studyUri' => $study_uri,
       'permissions' => $permissionMatrix,
+      'workflowAccess' => $workflowAccess,
       'currentUser' => [
         'id' => (string) $account->id(),
         'name' => $account->getDisplayName(),
@@ -624,6 +753,7 @@ class CttEditorController extends ControllerBase {
       ],
       'execution' => [
         'mode' => $isExecutionMode ? 'execution' : 'edit',
+        'readOnlyPreview' => !empty($workflowAccess['readOnlyPreview']),
         'daUri' => $daUri,
         'dataFileUri' => $dataFileUri,
         'studyUri' => $study_uri,

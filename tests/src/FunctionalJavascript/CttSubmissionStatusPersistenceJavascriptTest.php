@@ -37,6 +37,7 @@ final class CttSubmissionStatusPersistenceJavascriptTest extends WebDriverTestBa
     \Drupal::state()->set('ctt.study_status.' . sha1($studyUri), 'draft');
 
     $account = $this->createUser(['access ctt editor', 'submit ctt workflow']);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $account->getEmail());
     $this->drupalLogin($account);
 
     $this->drupalGet('/ctt/submission/' . $studyParam);
