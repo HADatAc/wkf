@@ -59,6 +59,315 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Checks if host points to the local machine loopback aliases.
+   */
+  protected function isLocalhostHost(string $host): bool {
+    $normalized = strtolower(trim($host));
+    return $normalized === 'localhost' || $normalized === '127.0.0.1';
+  }
+
+  /**
+   * Rebuild URI from parsed URL parts.
+   */
+  protected function buildUriFromParts(array $parts): string {
+    if (empty($parts['scheme']) || empty($parts['host'])) {
+      return '';
+    }
+
+    $uri = (string) $parts['scheme'] . '://';
+
+    if (!empty($parts['user'])) {
+      $uri .= (string) $parts['user'];
+      if (array_key_exists('pass', $parts) && $parts['pass'] !== NULL && $parts['pass'] !== '') {
+        $uri .= ':' . (string) $parts['pass'];
+      }
+      $uri .= '@';
+    }
+
+    $uri .= (string) $parts['host'];
+
+    if (isset($parts['port']) && is_numeric($parts['port'])) {
+      $uri .= ':' . (string) $parts['port'];
+    }
+
+    $uri .= (string) ($parts['path'] ?? '');
+
+    if (isset($parts['query']) && $parts['query'] !== '') {
+      $uri .= '?' . (string) $parts['query'];
+    }
+
+    if (isset($parts['fragment']) && $parts['fragment'] !== '') {
+      $uri .= '#' . (string) $parts['fragment'];
+    }
+
+    return $uri;
+  }
+
+  /**
+   * Replace localhost/127.0.0.1 with host.docker.internal for container reachability.
+   */
+  protected function normalizeContainerReachableUri(string $value): string {
+    $uri = trim($value);
+    if (!$this->isUri($uri)) {
+      return $uri;
+    }
+
+    $parts = parse_url($uri);
+    if (!is_array($parts) || empty($parts['host'])) {
+      return $uri;
+    }
+
+    if (!$this->isLocalhostHost((string) $parts['host'])) {
+      return $uri;
+    }
+
+    $parts['host'] = 'host.docker.internal';
+    $normalized = $this->buildUriFromParts($parts);
+    return $normalized !== '' ? $normalized : $uri;
+  }
+
+  /**
+   * Extract study code token (e.g. STD123...) from study URI.
+   */
+  protected function extractStudyCodeFromUri(string $studyUri): string {
+    if (!preg_match('/STD[0-9A-Za-z_-]+/', $studyUri, $matches)) {
+      return '';
+    }
+
+    return trim((string) ($matches[0] ?? ''));
+  }
+
+  /**
+   * Score CSV dataset filename candidates (higher score = better default).
+   */
+  protected function scoreDatasetFilenameCandidate(string $filename): int {
+    $name = strtoupper(trim($filename));
+    if ($name === '' || !str_ends_with($name, '.CSV')) {
+      return -1000;
+    }
+
+    $score = 0;
+    if (str_starts_with($name, 'DA_')) {
+      $score += 20;
+    }
+    if (str_contains($name, 'SIMULADA')) {
+      $score += 120;
+    }
+    if (str_contains($name, 'DATASET')) {
+      $score += 10;
+    }
+    if (str_contains($name, 'QUESTIONARIO') || str_contains($name, 'VARIAVEIS')) {
+      $score -= 30;
+    }
+
+    return $score;
+  }
+
+  /**
+   * Resolve a dataset CSV filename for study-bound R execution fallback.
+   */
+  protected function resolveStudyDatasetFilename(string $studyUri): string {
+    $normalizedStudyUri = trim($studyUri);
+    if (!$this->isUri($normalizedStudyUri)) {
+      return '';
+    }
+
+    $latest = \Drupal::state()->get('tmp.auto.e2e.latest');
+    if (is_array($latest)) {
+      $latestStudy = trim((string) (($latest['entities']['study'] ?? '')));
+      if ($latestStudy !== '' && strcasecmp($latestStudy, $normalizedStudyUri) === 0) {
+        $files = is_array($latest['files'] ?? NULL) ? $latest['files'] : [];
+        foreach (['simulated_dataset_csv', 'questionnaire_csv', 'variable_dictionary_csv'] as $key) {
+          $candidateUri = trim((string) ($files[$key] ?? ''));
+          if ($candidateUri === '') {
+            continue;
+          }
+
+          $candidateName = trim((string) basename($candidateUri));
+          if ($this->scoreDatasetFilenameCandidate($candidateName) > -1000) {
+            return $candidateName;
+          }
+        }
+      }
+    }
+
+    $studyCode = $this->extractStudyCodeFromUri($normalizedStudyUri);
+    if ($studyCode === '' || !\Drupal::hasService('file_system')) {
+      return '';
+    }
+
+    $fileSystem = \Drupal::service('file_system');
+    $realDir = $fileSystem->realpath('private://std/' . $studyCode . '/da');
+    if (!is_string($realDir) || $realDir === '' || !is_dir($realDir)) {
+      return '';
+    }
+
+    $csvFiles = glob(rtrim($realDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . '*.csv');
+    if (!is_array($csvFiles) || empty($csvFiles)) {
+      return '';
+    }
+
+    $bestName = '';
+    $bestScore = -1000;
+    foreach ($csvFiles as $csvPath) {
+      $candidateName = trim((string) basename((string) $csvPath));
+      $score = $this->scoreDatasetFilenameCandidate($candidateName);
+      if ($score > $bestScore) {
+        $bestScore = $score;
+        $bestName = $candidateName;
+      }
+    }
+
+    return $bestName;
+  }
+
+  /**
+   * Resolve public Drupal base URL suitable for HASCOAPI container downloads.
+   */
+  protected function resolvePublicBaseUrlForRAnalysis(Request $request, array $tool = []): string {
+    $envBase = trim((string) getenv('PMSR_BASE_URL'));
+    if ($this->isUri($envBase)) {
+      return rtrim($this->normalizeContainerReachableUri($envBase), '/');
+    }
+
+    $artifactUri = trim((string) ($tool['artifactUri'] ?? ''));
+    if ($this->isUri($artifactUri)) {
+      $artifactUri = $this->normalizeContainerReachableUri($artifactUri);
+      $parts = parse_url($artifactUri);
+      if (is_array($parts) && !empty($parts['scheme']) && !empty($parts['host'])) {
+        $origin = (string) $parts['scheme'] . '://' . (string) $parts['host'];
+        if (isset($parts['port']) && is_numeric($parts['port'])) {
+          $origin .= ':' . (string) $parts['port'];
+        }
+
+        $path = (string) ($parts['path'] ?? '');
+        $stdPos = strpos($path, '/std/');
+        if ($stdPos !== FALSE) {
+          return rtrim($origin . substr($path, 0, $stdPos), '/');
+        }
+
+        return rtrim($origin, '/');
+      }
+    }
+
+    $scheme = trim((string) $request->getScheme()) ?: 'http';
+    $host = trim((string) $request->getHost());
+    if ($host === '') {
+      $host = 'host.docker.internal';
+    }
+    if ($this->isLocalhostHost($host)) {
+      $host = 'host.docker.internal';
+    }
+
+    $port = (int) $request->getPort();
+    $basePath = rtrim((string) $request->getBasePath(), '/');
+
+    $base = $scheme . '://' . $host;
+    if (($scheme === 'http' && $port > 0 && $port !== 80) || ($scheme === 'https' && $port > 0 && $port !== 443)) {
+      $base .= ':' . $port;
+    }
+
+    if ($basePath !== '') {
+      $base .= $basePath;
+    }
+
+    return rtrim($base, '/');
+  }
+
+  /**
+   * Build dataset download URL for std/download-file endpoint.
+   */
+  protected function buildDatasetDownloadUrlForStudy(string $studyUri, string $datasetFilename, Request $request, array $tool = []): string {
+    if (!$this->isUri($studyUri) || trim($datasetFilename) === '') {
+      return '';
+    }
+
+    $baseUrl = $this->resolvePublicBaseUrlForRAnalysis($request, $tool);
+    if (!$this->isUri($baseUrl)) {
+      return '';
+    }
+
+    return rtrim($baseUrl, '/')
+      . '/std/download-file/' . rawurlencode(base64_encode($datasetFilename))
+      . '/' . rawurlencode(base64_encode($studyUri))
+      . '/da';
+  }
+
+  /**
+   * Normalize rscriptArgs values and rewrite localhost URLs when needed.
+   *
+   * @param mixed $rawArgs
+   * @return array<int, string>
+   */
+  protected function normalizeRscriptArgs($rawArgs): array {
+    if (is_string($rawArgs)) {
+      $rawArgs = trim($rawArgs);
+      $rawArgs = ($rawArgs !== '') ? [$rawArgs] : [];
+    }
+
+    if (!is_array($rawArgs)) {
+      return [];
+    }
+
+    $normalized = [];
+    foreach ($rawArgs as $arg) {
+      if (!is_scalar($arg)) {
+        continue;
+      }
+
+      $value = trim((string) $arg);
+      if ($value === '') {
+        continue;
+      }
+
+      if ($this->isUri($value)) {
+        $value = $this->normalizeContainerReachableUri($value);
+      }
+
+      $normalized[] = $value;
+    }
+
+    return $normalized;
+  }
+
+  /**
+   * Ensure execute payload satisfies updated HASCOAPI requirement for rscriptArgs.
+   */
+  protected function ensureExecuteRscriptArgs(array $arguments, string $studyUri, array $tool, Request $request, array &$issues): array {
+    $normalizedArgs = $arguments;
+
+    $currentRscriptArgs = $this->normalizeRscriptArgs($normalizedArgs['rscriptArgs'] ?? []);
+    if (!empty($currentRscriptArgs)) {
+      $normalizedArgs['rscriptArgs'] = $currentRscriptArgs;
+      return $normalizedArgs;
+    }
+
+    $datasetFilename = $this->resolveStudyDatasetFilename($studyUri);
+    if ($datasetFilename === '') {
+      $issues[] = $this->buildValidationIssue(
+        'arguments.rscriptArgs',
+        'missing_rscript_args',
+        'R execute requires arguments.rscriptArgs and no dataset CSV could be inferred automatically for this study.'
+      );
+      return $normalizedArgs;
+    }
+
+    $datasetUrl = $this->buildDatasetDownloadUrlForStudy($studyUri, $datasetFilename, $request, $tool);
+    if ($datasetUrl === '') {
+      $issues[] = $this->buildValidationIssue(
+        'arguments.rscriptArgs',
+        'unable_to_build_dataset_url',
+        'Unable to build dataset download URL for automatic rscriptArgs fallback.'
+      );
+      return $normalizedArgs;
+    }
+
+    $normalizedArgs['rscriptArgs'] = [$datasetUrl];
+
+    return $normalizedArgs;
+  }
+
+  /**
    * Build a normalized validation issue payload.
    */
   protected function buildValidationIssue(string $field, string $code, string $message, string $severity = 'error'): array {
@@ -2079,6 +2388,10 @@ class CttApiController extends ControllerBase {
       }
     }
 
+    if (!$validateOnly) {
+      $arguments = $this->ensureExecuteRscriptArgs($arguments, $studyUri, $tool, $request, $issues);
+    }
+
     $errorCount = 0;
     foreach ($issues as $issue) {
       if (($issue['severity'] ?? 'error') === 'error') {
@@ -2107,11 +2420,11 @@ class CttApiController extends ControllerBase {
       'studyUri' => $studyUri,
       'processUri' => $processUri,
       'tool' => [
-        'toolUri' => (string) ($tool['toolUri'] ?? $toolUri),
+        'toolUri' => $this->normalizeContainerReachableUri((string) ($tool['toolUri'] ?? $toolUri)),
         'name' => (string) ($tool['name'] ?? ''),
         'version' => (string) ($tool['version'] ?? ''),
         'language' => (string) ($tool['language'] ?? ''),
-        'artifactUri' => (string) ($tool['artifactUri'] ?? ''),
+        'artifactUri' => $this->normalizeContainerReachableUri((string) ($tool['artifactUri'] ?? '')),
         'artifactFilename' => (string) ($tool['artifactFilename'] ?? ''),
         'sourceRepositoryUri' => (string) ($tool['sourceRepositoryUri'] ?? ''),
         'entrypoint' => $resolvedEntrypoint,
