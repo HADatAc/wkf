@@ -43,7 +43,6 @@ final class CttRAnalysisPageJavascriptTest extends WebDriverTestBase {
     ]);
 
     $this->assertSession()->elementExists('css', '#ctt-r-analysis-page');
-    $this->assertSession()->pageTextContains('No mocked data: this interface only uses real catalog entries, real study associations, and real backend execution responses.');
     $this->assertSession()->elementExists('css', '#ctt-r-analysis-form');
     $this->assertSession()->elementExists('css', '#ctt-r-study-uri');
     $this->assertSession()->elementExists('css', '#ctt-r-process-uri');
@@ -56,6 +55,7 @@ final class CttRAnalysisPageJavascriptTest extends WebDriverTestBase {
     $this->assertSession()->elementExists('css', '#ctt-r-load-context');
     $this->assertSession()->elementExists('css', '#ctt-r-run-analysis');
     $this->assertSession()->elementExists('css', '#ctt-r-copy-payload');
+    $this->assertSession()->elementExists('css', '#ctt-r-download-log');
     $this->assertSession()->elementExists('css', '#ctt-r-clear-saved-context');
     $this->assertSession()->elementExists('css', '#ctt-r-exec-diagnostics');
 
@@ -66,6 +66,10 @@ final class CttRAnalysisPageJavascriptTest extends WebDriverTestBase {
       . " && drupalSettings.cttRAnalysis"
       . " && drupalSettings.cttRAnalysis.toolsEndpoint"
       . " && drupalSettings.cttRAnalysis.toolsEndpoint.indexOf('/workflow/api/repo/analytical-tools') !== -1"
+      . " && drupalSettings.cttRAnalysis.studyAutocompleteEndpoint"
+      . " && drupalSettings.cttRAnalysis.studyAutocompleteEndpoint.indexOf('/workflow/api/r-analysis/autocomplete/study') !== -1"
+      . " && drupalSettings.cttRAnalysis.processAutocompleteEndpoint"
+      . " && drupalSettings.cttRAnalysis.processAutocompleteEndpoint.indexOf('/workflow/api/r-analysis/autocomplete/process') !== -1"
       . " && drupalSettings.cttRAnalysis.associationsEndpoint"
       . " && drupalSettings.cttRAnalysis.associationsEndpoint.indexOf('/workflow/api/submission/associations') !== -1"
       . " && drupalSettings.cttRAnalysis.executeEndpoint"

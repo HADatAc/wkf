@@ -2,6 +2,10 @@
   "use strict";
 
   const STORAGE_KEY = "ctt:r-analysis:context:v1";
+  const HISTORY_KEY = "ctt:r-analysis:uri-history:v1";
+  const MAX_URI_SUGGESTIONS = 25;
+  const MAX_AUTOCOMPLETE_SUGGESTIONS = 30;
+  const MAX_BACKEND_STUDY_SUGGESTIONS = 20;
 
   const ARGUMENT_TEMPLATES = {
     "aspiration-baseline": {
@@ -43,6 +47,59 @@
 
   const isHttpUri = function (value) {
     return /^https?:\/\//i.test(String(value || "").trim());
+  };
+
+  const uriFromAutocompleteValue = function (value) {
+    const normalized = String(value || "").trim();
+    if (isHttpUri(normalized)) {
+      return normalized;
+    }
+
+    const match = normalized.match(/\[([^\]]+)\]\s*$/);
+    if (!match || match.length < 2) {
+      return "";
+    }
+
+    const uri = String(match[1] || "").trim();
+    return isHttpUri(uri) ? uri : "";
+  };
+
+  const formatAutocompleteValue = function (uri, label) {
+    const normalizedUri = String(uri || "").trim();
+    if (!isHttpUri(normalizedUri)) {
+      return "";
+    }
+
+    const normalizedLabel = String(label || "").trim();
+    if (normalizedLabel === "") {
+      return normalizedUri;
+    }
+
+    return normalizedLabel + " [" + normalizedUri + "]";
+  };
+
+  const normalizeUriInput = function (value) {
+    return uriFromAutocompleteValue(value);
+  };
+
+  const normalizeSuggestionValues = function (values) {
+    if (!Array.isArray(values)) {
+      return [];
+    }
+
+    const unique = [];
+    const seen = {};
+
+    values.forEach(function (value) {
+      const normalized = String(value || "").trim();
+      if (normalized === "" || Object.prototype.hasOwnProperty.call(seen, normalized)) {
+        return;
+      }
+      seen[normalized] = true;
+      unique.push(normalized);
+    });
+
+    return unique.slice(0, MAX_AUTOCOMPLETE_SUGGESTIONS);
   };
 
   const parseResponsePayload = async function (response) {
@@ -107,14 +164,146 @@
     return copied;
   };
 
+  const triggerDownload = function (filename, contents, mimeType) {
+    const blob = new Blob([
+      String(contents || "")
+    ], {
+      type: mimeType || "application/json;charset=utf-8"
+    });
+
+    const objectUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = String(filename || "r-analysis-log.json");
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    window.setTimeout(function () {
+      window.URL.revokeObjectURL(objectUrl);
+    }, 0);
+  };
+
+  const sanitizeFilenameSegment = function (value, fallback) {
+    const normalized = String(value || "")
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+
+    if (normalized !== "") {
+      return normalized;
+    }
+
+    return String(fallback || "value");
+  };
+
+  const buildFilenameTimestamp = function (dateValue) {
+    const date = dateValue instanceof Date ? dateValue : new Date();
+    const pad = function (number) {
+      return String(number).padStart(2, "0");
+    };
+
+    return date.getFullYear()
+      + pad(date.getMonth() + 1)
+      + pad(date.getDate())
+      + "-"
+      + pad(date.getHours())
+      + pad(date.getMinutes())
+      + pad(date.getSeconds());
+  };
+
+  const extractLogLines = function (payload) {
+    const lines = [];
+
+    const appendLines = function (value) {
+      if (!Array.isArray(value)) {
+        return;
+      }
+
+      value.forEach(function (entry) {
+        const normalized = String(entry || "").trim();
+        if (normalized !== "") {
+          lines.push(normalized);
+        }
+      });
+    };
+
+    if (!payload || typeof payload !== "object") {
+      return lines;
+    }
+
+    appendLines(payload.logs);
+    appendLines(payload.executionLogs);
+
+    if (payload.upstream && typeof payload.upstream === "object" && payload.upstream.body && typeof payload.upstream.body === "object") {
+      appendLines(payload.upstream.body.logs);
+    }
+
+    return lines;
+  };
+
+  const updateDownloadLogButtonState = function (state) {
+    if (!state || !state.downloadLogButton) {
+      return;
+    }
+
+    state.downloadLogButton.disabled = !(state.lastExecutionPayload && typeof state.lastExecutionPayload === "object");
+  };
+
+  const ensureFeedbackUi = function (state) {
+    if (!state || !state.feedback) {
+      return;
+    }
+
+    let messageNode = state.feedback.querySelector(".ctt-r-feedback-message");
+    let closeButton = state.feedback.querySelector(".ctt-r-feedback-close");
+
+    if (!messageNode || !closeButton) {
+      state.feedback.innerHTML = "";
+
+      messageNode = document.createElement("span");
+      messageNode.className = "ctt-r-feedback-message";
+      state.feedback.appendChild(messageNode);
+
+      closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "btn-close ctt-r-feedback-close";
+      closeButton.setAttribute("aria-label", "Close notification");
+      state.feedback.appendChild(closeButton);
+    }
+
+    state.feedbackMessage = messageNode;
+    state.feedbackClose = closeButton;
+  };
+
+  const getFeedbackClassName = function (alertClass, hidden) {
+    const classes = [
+      "alert",
+      "ctt-r-feedback",
+      "ctt-r-feedback-floating"
+    ];
+
+    if (hidden) {
+      classes.push("d-none");
+    } else {
+      classes.push(alertClass, "alert-dismissible", "fade", "show");
+    }
+
+    return classes.join(" ");
+  };
+
   const setFeedback = function (state, type, message) {
     if (!state.feedback) {
       return;
     }
 
+    ensureFeedbackUi(state);
+
     if (!message) {
-      state.feedback.className = "alert d-none";
-      state.feedback.textContent = "";
+      state.feedback.className = getFeedbackClassName("", true);
+      if (state.feedbackMessage) {
+        state.feedbackMessage.textContent = "";
+      }
       return;
     }
 
@@ -127,8 +316,10 @@
       alertClass = "alert-warning";
     }
 
-    state.feedback.className = "alert " + alertClass;
-    state.feedback.textContent = message;
+    state.feedback.className = getFeedbackClassName(alertClass, false);
+    if (state.feedbackMessage) {
+      state.feedbackMessage.textContent = message;
+    }
   };
 
   const summarizeUris = function (label, values, key) {
@@ -408,6 +599,454 @@
     }
   };
 
+  const createEmptyUriHistory = function () {
+    return {
+      studies: [],
+      processes: [],
+      processByStudy: {}
+    };
+  };
+
+  const normalizeUriList = function (values) {
+    if (!Array.isArray(values)) {
+      return [];
+    }
+
+    const unique = [];
+    const seen = {};
+
+    values.forEach(function (value) {
+      const normalized = String(value || "").trim();
+      if (!isHttpUri(normalized) || Object.prototype.hasOwnProperty.call(seen, normalized)) {
+        return;
+      }
+      seen[normalized] = true;
+      unique.push(normalized);
+    });
+
+    return unique.slice(0, MAX_URI_SUGGESTIONS);
+  };
+
+  const normalizeProcessByStudy = function (value) {
+    if (!value || typeof value !== "object") {
+      return {};
+    }
+
+    const normalized = {};
+    Object.keys(value).forEach(function (studyUri) {
+      const normalizedStudyUri = String(studyUri || "").trim();
+      const normalizedProcessUri = String(value[studyUri] || "").trim();
+      if (!isHttpUri(normalizedStudyUri) || !isHttpUri(normalizedProcessUri)) {
+        return;
+      }
+      normalized[normalizedStudyUri] = normalizedProcessUri;
+    });
+    return normalized;
+  };
+
+  const loadUriHistory = function () {
+    try {
+      if (!window.localStorage) {
+        return createEmptyUriHistory();
+      }
+
+      const raw = window.localStorage.getItem(HISTORY_KEY);
+      if (!raw) {
+        return createEmptyUriHistory();
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") {
+        return createEmptyUriHistory();
+      }
+
+      return {
+        studies: normalizeUriList(parsed.studies),
+        processes: normalizeUriList(parsed.processes),
+        processByStudy: normalizeProcessByStudy(parsed.processByStudy)
+      };
+    } catch {
+      return createEmptyUriHistory();
+    }
+  };
+
+  const saveUriHistory = function (history) {
+    try {
+      if (!window.localStorage) {
+        return;
+      }
+
+      const normalized = history && typeof history === "object"
+        ? history
+        : createEmptyUriHistory();
+
+      const payload = {
+        studies: normalizeUriList(normalized.studies),
+        processes: normalizeUriList(normalized.processes),
+        processByStudy: normalizeProcessByStudy(normalized.processByStudy)
+      };
+
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore local storage exceptions in hardened browser contexts.
+    }
+  };
+
+  const prependUriSuggestion = function (list, value) {
+    const normalized = String(value || "").trim();
+    const base = normalizeUriList(list);
+
+    if (!isHttpUri(normalized)) {
+      return base;
+    }
+
+    const filtered = base.filter(function (item) {
+      return item !== normalized;
+    });
+    filtered.unshift(normalized);
+    return filtered.slice(0, MAX_URI_SUGGESTIONS);
+  };
+
+  const renderSuggestionList = function (element, values) {
+    if (!element) {
+      return;
+    }
+
+    const normalized = normalizeSuggestionValues(values);
+    const options = normalized.map(function (value) {
+      return '<option value="' + escapeHtml(value) + '"></option>';
+    });
+    element.innerHTML = options.join("");
+  };
+
+  const resolveDisplayValueForUri = function (state, uri) {
+    const normalizedUri = String(uri || "").trim();
+    if (!isHttpUri(normalizedUri)) {
+      return "";
+    }
+
+    const known = String(
+      state
+      && state.autocompleteDisplayByUri
+      && state.autocompleteDisplayByUri[normalizedUri]
+      || ""
+    ).trim();
+
+    if (known !== "") {
+      return known;
+    }
+
+    return normalizedUri;
+  };
+
+  const uriHistoryToDisplayValues = function (state, values) {
+    return normalizeUriList(values).map(function (uri) {
+      return resolveDisplayValueForUri(state, uri);
+    });
+  };
+
+  const rememberAutocompleteEntries = function (state, entries) {
+    if (!state || !state.autocompleteDisplayByUri || !Array.isArray(entries)) {
+      return;
+    }
+
+    entries.forEach(function (entry) {
+      if (!entry || typeof entry !== "object") {
+        return;
+      }
+
+      const entryValue = String(entry.value || "").trim();
+      const entryUri = normalizeUriInput(entry.uri || entryValue);
+      if (!isHttpUri(entryUri)) {
+        return;
+      }
+
+      const entryLabel = String(entry.label || "").trim();
+      const displayValue = entryValue !== ""
+        ? entryValue
+        : formatAutocompleteValue(entryUri, entryLabel);
+
+      state.autocompleteDisplayByUri[entryUri] = displayValue !== "" ? displayValue : entryUri;
+    });
+  };
+
+  const rememberDisplayValueFromInput = function (state, rawValue) {
+    if (!state || !state.autocompleteDisplayByUri) {
+      return;
+    }
+
+    const value = String(rawValue || "").trim();
+    const uri = normalizeUriInput(value);
+    if (!isHttpUri(uri)) {
+      return;
+    }
+
+    state.autocompleteDisplayByUri[uri] = value !== "" ? value : uri;
+  };
+
+  const refreshUriSuggestions = function (state) {
+    if (!state || !state.uriHistory) {
+      return;
+    }
+
+    renderSuggestionList(state.studyUriSuggestions, uriHistoryToDisplayValues(state, state.uriHistory.studies));
+    renderSuggestionList(state.processUriSuggestions, uriHistoryToDisplayValues(state, state.uriHistory.processes));
+  };
+
+  const rememberUriContext = function (state, studyUriValue, processUriValue) {
+    if (!state) {
+      return;
+    }
+
+    if (!state.uriHistory || typeof state.uriHistory !== "object") {
+      state.uriHistory = createEmptyUriHistory();
+    }
+
+    const studyUri = normalizeUriInput(studyUriValue);
+    const processUri = normalizeUriInput(processUriValue);
+
+    state.uriHistory.studies = prependUriSuggestion(state.uriHistory.studies, studyUri);
+    state.uriHistory.processes = prependUriSuggestion(state.uriHistory.processes, processUri);
+
+    if (isHttpUri(studyUri) && isHttpUri(processUri)) {
+      state.uriHistory.processByStudy[studyUri] = processUri;
+    }
+
+    saveUriHistory(state.uriHistory);
+    refreshUriSuggestions(state);
+  };
+
+  const autofillProcessFromStudy = function (state) {
+    if (!state || !state.studyUri || !state.processUri || !state.uriHistory) {
+      return;
+    }
+
+    const studyUri = normalizeUriInput(state.studyUri.value || "");
+    if (!isHttpUri(studyUri)) {
+      return;
+    }
+
+    const mappedProcessUri = String(state.uriHistory.processByStudy[studyUri] || "").trim();
+    if (!isHttpUri(mappedProcessUri)) {
+      return;
+    }
+
+    const processUri = normalizeUriInput(state.processUri.value || "");
+    if (processUri === "" || !isHttpUri(processUri)) {
+      state.processUri.value = resolveDisplayValueForUri(state, mappedProcessUri);
+    }
+  };
+
+  const requestRemoteAutocompleteSuggestions = async function (state, kind, query) {
+    if (!state || !state.uriHistory) {
+      return;
+    }
+
+    const normalizedKind = kind === "process" ? "process" : "study";
+    const endpoint = normalizedKind === "study"
+      ? String(state.studyAutocompleteEndpoint || "").trim()
+      : String(state.processAutocompleteEndpoint || "").trim();
+    const suggestionElement = normalizedKind === "study"
+      ? state.studyUriSuggestions
+      : state.processUriSuggestions;
+    const historyValues = normalizedKind === "study"
+      ? uriHistoryToDisplayValues(state, state.uriHistory.studies)
+      : uriHistoryToDisplayValues(state, state.uriHistory.processes);
+    const normalizedQuery = String(query || "").trim();
+
+    if (!suggestionElement) {
+      return;
+    }
+
+    if (endpoint === "" || normalizedQuery.length < 2) {
+      renderSuggestionList(suggestionElement, historyValues);
+      return;
+    }
+
+    const requestToken = normalizedKind + ":" + String(Date.now()) + ":" + String(Math.random());
+    if (state.autocompleteRequestToken && typeof state.autocompleteRequestToken === "object") {
+      state.autocompleteRequestToken[normalizedKind] = requestToken;
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.set("q", normalizedQuery);
+
+      const response = await fetch(buildEndpointUrl(endpoint, params), {
+        method: "GET",
+        credentials: "same-origin"
+      });
+      const payload = await parseResponsePayload(response);
+
+      if (state.autocompleteRequestToken && state.autocompleteRequestToken[normalizedKind] !== requestToken) {
+        return;
+      }
+
+      const entries = response.ok && Array.isArray(payload) ? payload : [];
+      rememberAutocompleteEntries(state, entries);
+
+      const remoteValues = entries.map(function (entry) {
+        return String(entry && entry.value || "").trim();
+      }).filter(function (value) {
+        return value !== "";
+      });
+
+      renderSuggestionList(suggestionElement, remoteValues.concat(historyValues));
+    } catch {
+      if (state.autocompleteRequestToken && state.autocompleteRequestToken[normalizedKind] !== requestToken) {
+        return;
+      }
+      renderSuggestionList(suggestionElement, historyValues);
+    }
+  };
+
+  const scheduleAutocompleteSuggestions = function (state, kind) {
+    if (!state || !state.autocompleteTimers || typeof state.autocompleteTimers !== "object") {
+      return;
+    }
+
+    const normalizedKind = kind === "process" ? "process" : "study";
+    const input = normalizedKind === "study" ? state.studyUri : state.processUri;
+    if (!input) {
+      return;
+    }
+
+    if (state.autocompleteTimers[normalizedKind]) {
+      window.clearTimeout(state.autocompleteTimers[normalizedKind]);
+    }
+
+    const query = String(input.value || "").trim();
+    state.autocompleteTimers[normalizedKind] = window.setTimeout(function () {
+      requestRemoteAutocompleteSuggestions(state, normalizedKind, query);
+    }, 180);
+  };
+
+  const buildEndpointUrl = function (endpoint, params) {
+    const query = params && typeof params.toString === "function" ? params.toString() : "";
+    if (query === "") {
+      return endpoint;
+    }
+    return endpoint + (endpoint.indexOf("?") === -1 ? "?" : "&") + query;
+  };
+
+  const extractStudyUriFromTool = function (tool) {
+    if (!tool || typeof tool !== "object") {
+      return "";
+    }
+
+    const candidates = [
+      tool.studyUri,
+      tool.scenarioUri,
+      tool.hasStudyUri,
+      tool.hasStudy
+    ];
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const value = String(candidates[i] || "").trim();
+      if (isHttpUri(value)) {
+        return value;
+      }
+    }
+
+    return "";
+  };
+
+  const fetchStoredProcessForStudy = async function (state, studyUri) {
+    if (!state || !state.statusEndpoint || !isHttpUri(studyUri)) {
+      return "";
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.set("studyUri", studyUri);
+
+      const response = await fetch(buildEndpointUrl(state.statusEndpoint, params), {
+        method: "GET",
+        credentials: "same-origin"
+      });
+      const payload = await parseResponsePayload(response);
+
+      if (!response.ok || !payload || payload.isValid === false) {
+        return "";
+      }
+
+      const storedProcessUri = String(
+        payload
+        && payload.association
+        && payload.association.studyProcess
+        && payload.association.studyProcess.storedProcessUri
+        || ""
+      ).trim();
+
+      return isHttpUri(storedProcessUri) ? storedProcessUri : "";
+    } catch {
+      return "";
+    }
+  };
+
+  const bootstrapUriSuggestionsFromBackend = async function (state) {
+    if (!state || state.bootstrapSuggestionsLoaded || !state.toolsEndpoint) {
+      return;
+    }
+
+    state.bootstrapSuggestionsLoaded = true;
+
+    try {
+      const params = new URLSearchParams();
+      params.set("language", "R");
+      params.set("limit", "200");
+      params.set("offset", "0");
+
+      const response = await fetch(buildEndpointUrl(state.toolsEndpoint, params), {
+        method: "GET",
+        credentials: "same-origin"
+      });
+      const payload = await parseResponsePayload(response);
+      if (!response.ok || !payload || payload.isSuccessful === false) {
+        return;
+      }
+
+      const tools = Array.isArray(payload.body) ? payload.body : [];
+      const studies = [];
+      const seenStudies = {};
+
+      tools.forEach(function (tool) {
+        const studyUri = extractStudyUriFromTool(tool);
+        if (studyUri === "" || Object.prototype.hasOwnProperty.call(seenStudies, studyUri)) {
+          return;
+        }
+        seenStudies[studyUri] = true;
+        studies.push(studyUri);
+      });
+
+      const limitedStudies = studies.slice(0, MAX_BACKEND_STUDY_SUGGESTIONS);
+      limitedStudies.forEach(function (studyUri) {
+        rememberUriContext(state, studyUri, "");
+      });
+
+      if (state.statusEndpoint && limitedStudies.length > 0) {
+        const resolutions = await Promise.all(limitedStudies.map(async function (studyUri) {
+          const processUri = await fetchStoredProcessForStudy(state, studyUri);
+          return {
+            studyUri: studyUri,
+            processUri: processUri
+          };
+        }));
+
+        resolutions.forEach(function (item) {
+          if (item && isHttpUri(item.studyUri) && isHttpUri(item.processUri)) {
+            rememberUriContext(state, item.studyUri, item.processUri);
+          }
+        });
+      }
+
+      autofillProcessFromStudy(state);
+      saveContext(state);
+    } catch {
+      // Ignore bootstrap failures and keep local-only suggestions.
+    }
+  };
+
   const saveContext = function (state) {
     try {
       if (!window.localStorage) {
@@ -415,8 +1054,8 @@
       }
 
       const snapshot = {
-        studyUri: String(state.studyUri && state.studyUri.value || "").trim(),
-        processUri: String(state.processUri && state.processUri.value || "").trim(),
+        studyUri: normalizeUriInput(state.studyUri && state.studyUri.value || ""),
+        processUri: normalizeUriInput(state.processUri && state.processUri.value || ""),
         toolUri: String(state.toolUri && state.toolUri.value || "").trim(),
         entrypoint: String(state.entrypoint && state.entrypoint.value || "").trim(),
         argumentsJson: String(state.argumentsJson && state.argumentsJson.value || ""),
@@ -473,6 +1112,7 @@
     try {
       if (window.localStorage) {
         window.localStorage.removeItem(STORAGE_KEY);
+        window.localStorage.removeItem(HISTORY_KEY);
       }
     } catch {
       // Ignore local storage exceptions in hardened browser contexts.
@@ -480,25 +1120,30 @@
 
     state.preferredToolUri = "";
     state.lastRequestPayload = null;
+    state.uriHistory = createEmptyUriHistory();
+    state.autocompleteDisplayByUri = {};
+    refreshUriSuggestions(state);
     if (state.templateSelect) {
       state.templateSelect.value = "";
     }
+
+    updateDownloadLogButtonState(state);
 
     setFeedback(state, "success", "Saved browser context cleared for this page.");
   };
 
   const buildRequestPayload = function (state) {
-    const studyUri = String(state.studyUri && state.studyUri.value || "").trim();
-    const processUri = String(state.processUri && state.processUri.value || "").trim();
+    const studyUri = normalizeUriInput(state.studyUri && state.studyUri.value || "");
+    const processUri = normalizeUriInput(state.processUri && state.processUri.value || "");
     const toolUri = String(state.toolUri && state.toolUri.value || "").trim();
     const entrypoint = String(state.entrypoint && state.entrypoint.value || "").trim();
     const validateOnly = Boolean(state.validateOnly && state.validateOnly.checked);
 
     if (!isHttpUri(studyUri)) {
-      return { ok: false, message: "Provide a valid Study URI." };
+      return { ok: false, message: "Provide a valid Study selection (name [URI] or URI)." };
     }
     if (!isHttpUri(processUri)) {
-      return { ok: false, message: "Provide a valid Process URI." };
+      return { ok: false, message: "Provide a valid Process selection (name [URI] or URI)." };
     }
     if (!isHttpUri(toolUri)) {
       return { ok: false, message: "Select a valid R tool URI from repository context." };
@@ -562,8 +1207,37 @@
       saveContext(state);
     };
 
-    bind(state.studyUri, "input", saveHandler);
-    bind(state.processUri, "input", saveHandler);
+    bind(state.studyUri, "input", function () {
+      scheduleAutocompleteSuggestions(state, "study");
+      saveContext(state);
+    });
+    bind(state.processUri, "input", function () {
+      scheduleAutocompleteSuggestions(state, "process");
+      saveContext(state);
+    });
+    bind(state.studyUri, "change", function () {
+      rememberDisplayValueFromInput(state, state.studyUri ? state.studyUri.value : "");
+      rememberDisplayValueFromInput(state, state.processUri ? state.processUri.value : "");
+      autofillProcessFromStudy(state);
+      rememberUriContext(
+        state,
+        state.studyUri ? state.studyUri.value : "",
+        state.processUri ? state.processUri.value : ""
+      );
+      scheduleAutocompleteSuggestions(state, "study");
+      saveContext(state);
+    });
+    bind(state.processUri, "change", function () {
+      rememberDisplayValueFromInput(state, state.studyUri ? state.studyUri.value : "");
+      rememberDisplayValueFromInput(state, state.processUri ? state.processUri.value : "");
+      rememberUriContext(
+        state,
+        state.studyUri ? state.studyUri.value : "",
+        state.processUri ? state.processUri.value : ""
+      );
+      scheduleAutocompleteSuggestions(state, "process");
+      saveContext(state);
+    });
     bind(state.entrypoint, "input", saveHandler);
     bind(state.validateOnly, "change", saveHandler);
     bind(state.argumentsJson, "input", saveHandler);
@@ -576,9 +1250,9 @@
   };
 
   const loadRealContext = async function (state) {
-    const studyUri = String(state.studyUri && state.studyUri.value || "").trim();
+    const studyUri = normalizeUriInput(state.studyUri && state.studyUri.value || "");
     if (!isHttpUri(studyUri)) {
-      setFeedback(state, "warning", "Provide a valid Study URI before loading context.");
+      setFeedback(state, "warning", "Provide a valid Study selection (name [URI] or URI) before loading context.");
       return;
     }
 
@@ -613,9 +1287,7 @@
 
       const associationsParams = new URLSearchParams();
       associationsParams.set("studyUri", studyUri);
-      const associationsUrl = state.associationsEndpoint
-        + (state.associationsEndpoint.indexOf("?") === -1 ? "?" : "&")
-        + associationsParams.toString();
+      const associationsUrl = buildEndpointUrl(state.associationsEndpoint, associationsParams);
 
       const associationsResponse = await fetch(associationsUrl, {
         method: "GET",
@@ -630,6 +1302,20 @@
 
       state.currentAssociations = associationsPayload.associations || {};
       renderAssociationsSummary(state, state.currentAssociations);
+
+      let processUriForContext = normalizeUriInput(state.processUri && state.processUri.value || "");
+      if (!isHttpUri(processUriForContext)) {
+        processUriForContext = await fetchStoredProcessForStudy(state, studyUri);
+        if (isHttpUri(processUriForContext) && state.processUri) {
+          state.processUri.value = resolveDisplayValueForUri(state, processUriForContext);
+        }
+      }
+
+      rememberUriContext(
+        state,
+        studyUri,
+        processUriForContext
+      );
       saveContext(state);
 
       if (Object.keys(state.toolsByUri).length === 0) {
@@ -657,6 +1343,7 @@
     const requestPayload = built.payload;
     const validateOnly = Boolean(requestPayload.validateOnly);
     state.lastRequestPayload = requestPayload;
+    rememberUriContext(state, requestPayload.studyUri, requestPayload.processUri);
     saveContext(state);
 
     const originalRunButtonText = state.runButton ? state.runButton.textContent : "";
@@ -664,6 +1351,9 @@
     if (state.runButton) {
       state.runButton.disabled = true;
       state.runButton.textContent = validateOnly ? "Validating..." : "Running...";
+    }
+    if (state.downloadLogButton) {
+      state.downloadLogButton.disabled = true;
     }
 
     try {
@@ -678,6 +1368,9 @@
       });
 
       const payload = await parseResponsePayload(response);
+      state.lastExecutionPayload = payload;
+      state.lastExecutionHttpStatus = response.status;
+      updateDownloadLogButtonState(state);
       setOutputPayload(state, payload);
       renderDiagnostics(state, payload, response.status);
 
@@ -709,6 +1402,7 @@
     } catch {
       resetDiagnostics(state, "Request failed before receiving a backend response.");
       setFeedback(state, "error", "Failed to execute R analysis request.");
+      updateDownloadLogButtonState(state);
     } finally {
       if (state.runButton) {
         state.runButton.disabled = false;
@@ -740,6 +1434,40 @@
     }
   };
 
+  const downloadExecutionLog = function (state) {
+    if (!state || !state.lastExecutionPayload || typeof state.lastExecutionPayload !== "object") {
+      setFeedback(state, "warning", "Run R Analysis first to enable log download.");
+      return;
+    }
+
+    const execution = state.lastExecutionPayload.execution && typeof state.lastExecutionPayload.execution === "object"
+      ? state.lastExecutionPayload.execution
+      : {};
+    const runId = String(execution.runId || "no-run-id");
+    const downloadedAt = new Date();
+
+    const payloadToSave = {
+      downloadedAt: downloadedAt.toISOString(),
+      responseHttpStatus: state.lastExecutionHttpStatus,
+      requestPayload: state.lastRequestPayload,
+      responsePayload: state.lastExecutionPayload,
+      extractedLogLines: extractLogLines(state.lastExecutionPayload)
+    };
+
+    const filename = "r-analysis-log-"
+      + sanitizeFilenameSegment(runId, "no-run-id")
+      + "-"
+      + buildFilenameTimestamp(downloadedAt)
+      + ".json";
+
+    try {
+      triggerDownload(filename, JSON.stringify(payloadToSave, null, 2), "application/json;charset=utf-8");
+      setFeedback(state, "success", "Execution log downloaded as JSON.");
+    } catch {
+      setFeedback(state, "error", "Unable to download execution log file.");
+    }
+  };
+
   Drupal.behaviors.cttRAnalysis = {
     attach: function (context) {
       once("ctt-r-analysis", "#ctt-r-analysis-page", context).forEach(function (root) {
@@ -749,11 +1477,16 @@
           root: root,
           toolsEndpoint: String(settings.toolsEndpoint || "").trim(),
           associationsEndpoint: String(settings.associationsEndpoint || "").trim(),
+          statusEndpoint: String(settings.statusEndpoint || "").trim(),
           executeEndpoint: String(settings.executeEndpoint || "").trim(),
+          studyAutocompleteEndpoint: String(settings.studyAutocompleteEndpoint || "").trim(),
+          processAutocompleteEndpoint: String(settings.processAutocompleteEndpoint || "").trim(),
           feedback: root.querySelector("#ctt-r-feedback"),
           form: root.querySelector("#ctt-r-analysis-form"),
           studyUri: root.querySelector("#ctt-r-study-uri"),
           processUri: root.querySelector("#ctt-r-process-uri"),
+          studyUriSuggestions: root.querySelector("#ctt-r-study-uri-suggestions"),
+          processUriSuggestions: root.querySelector("#ctt-r-process-uri-suggestions"),
           toolUri: root.querySelector("#ctt-r-tool-uri"),
           entrypoint: root.querySelector("#ctt-r-entrypoint"),
           validateOnly: root.querySelector("#ctt-r-validate-only"),
@@ -764,14 +1497,35 @@
           loadContextButton: root.querySelector("#ctt-r-load-context"),
           runButton: root.querySelector("#ctt-r-run-analysis"),
           copyPayloadButton: root.querySelector("#ctt-r-copy-payload"),
+          downloadLogButton: root.querySelector("#ctt-r-download-log"),
           contextSummary: root.querySelector("#ctt-r-context-summary"),
           diagnostics: root.querySelector("#ctt-r-exec-diagnostics"),
           output: root.querySelector("#ctt-r-response-output"),
+          uriHistory: loadUriHistory(),
+          autocompleteDisplayByUri: {},
+          autocompleteTimers: {
+            study: null,
+            process: null
+          },
+          autocompleteRequestToken: {
+            study: "",
+            process: ""
+          },
           toolsByUri: {},
           currentAssociations: {},
           preferredToolUri: "",
-          lastRequestPayload: null
+          lastRequestPayload: null,
+          lastExecutionPayload: null,
+          lastExecutionHttpStatus: null,
+          bootstrapSuggestionsLoaded: false
         };
+
+        ensureFeedbackUi(state);
+        if (state.feedbackClose) {
+          state.feedbackClose.addEventListener("click", function () {
+            setFeedback(state, "", "");
+          });
+        }
 
         if (state.studyUri && settings.initialStudyUri) {
           state.studyUri.value = String(settings.initialStudyUri);
@@ -781,8 +1535,19 @@
         }
 
         restoreContext(state);
+        autofillProcessFromStudy(state);
+        rememberUriContext(
+          state,
+          state.studyUri ? state.studyUri.value : "",
+          state.processUri ? state.processUri.value : ""
+        );
+        refreshUriSuggestions(state);
         bindPersistenceEvents(state);
         resetDiagnostics(state, "Run validation or execution to view diagnostics summary.");
+        bootstrapUriSuggestionsFromBackend(state);
+        scheduleAutocompleteSuggestions(state, "study");
+        scheduleAutocompleteSuggestions(state, "process");
+        updateDownloadLogButtonState(state);
 
         if (state.loadContextButton) {
           state.loadContextButton.addEventListener("click", function (event) {
@@ -819,7 +1584,14 @@
           });
         }
 
-        if (state.studyUri && String(state.studyUri.value || "").trim() !== "") {
+        if (state.downloadLogButton) {
+          state.downloadLogButton.addEventListener("click", function (event) {
+            event.preventDefault();
+            downloadExecutionLog(state);
+          });
+        }
+
+        if (state.studyUri && isHttpUri(normalizeUriInput(state.studyUri.value || ""))) {
           loadRealContext(state);
         }
       });

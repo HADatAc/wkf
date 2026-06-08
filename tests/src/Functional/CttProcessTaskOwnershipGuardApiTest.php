@@ -158,6 +158,79 @@ final class CttProcessTaskOwnershipGuardApiTest extends BrowserTestBase {
     $this->assertSame('owner-version', (string) ($ownerCreateVersionPayload['changelog'] ?? ''));
   }
 
+  public function testTaskCreateBootstrapsOwnerAndStripsProcessUri(): void {
+    $editor = $this->createUser(['edit ctt workflow']);
+    $processUri = 'http://example.org/workflow#/bootstrap-owner';
+    $taskUri = 'http://example.org/task/bootstrap-owner-task';
+
+    $mockHascoClient = new class {
+      /**
+       * @var array<string, mixed>
+       */
+      public array $capturedCreateElementCall = [];
+
+      /**
+       * @return array<string, mixed>
+       */
+      public function getByUri(string $uri): array {
+        // Deliberately omit manager/owner fields to exercise fallback owner bootstrap.
+        return ['uri' => $uri];
+      }
+
+      /**
+       * @param array<string, mixed> $data
+       * @return array<string, mixed>
+       */
+      public function createElement(string $type, array $data): array {
+        $this->capturedCreateElementCall = [
+          'type' => $type,
+          'data' => $data,
+        ];
+
+        return [
+          'uri' => (string) ($data['uri'] ?? ''),
+          'isSuccessful' => TRUE,
+        ];
+      }
+    };
+
+    $this->container->set('ctt.hasco_client', $mockHascoClient);
+    $controller = \Drupal::service('class_resolver')->getInstanceFromDefinition('Drupal\\ctt\\Controller\\CttApiController');
+
+    $response = $this->invokeAs($editor, function () use ($controller, $processUri, $taskUri): JsonResponse {
+      $request = Request::create(
+        '/workflow/api/task/create',
+        'POST',
+        [],
+        [],
+        [],
+        [],
+        Json::encode([
+          'uri' => $taskUri,
+          'label' => 'Bootstrap owner task',
+          'processUri' => $processUri,
+        ])
+      );
+
+      return $controller->createTask($request);
+    });
+
+    $this->assertSame(201, $response->getStatusCode());
+    $this->assertSame('task', (string) ($mockHascoClient->capturedCreateElementCall['type'] ?? ''));
+
+    $upstreamPayload = $mockHascoClient->capturedCreateElementCall['data'] ?? [];
+    $this->assertIsArray($upstreamPayload);
+    $this->assertArrayNotHasKey('processUri', $upstreamPayload);
+    $this->assertSame($taskUri, (string) ($upstreamPayload['uri'] ?? ''));
+
+    $normalizedProcessUri = str_replace('#/', '#', $processUri);
+    $ownerStateKey = 'ctt.process_owner_email.' . sha1($normalizedProcessUri);
+    $this->assertSame((string) $editor->getEmail(), (string) \Drupal::state()->get($ownerStateKey));
+
+    $taskProcessKey = 'ctt.task_process_uri.' . sha1($taskUri);
+    $this->assertSame($processUri, (string) \Drupal::state()->get($taskProcessKey));
+  }
+
   private function invokeAs(AccountInterface $account, callable $callback): JsonResponse {
     $switcher = \Drupal::service('account_switcher');
     $switcher->switchTo($account);

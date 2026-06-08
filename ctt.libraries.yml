@@ -46,6 +46,8 @@ ctt-r-analysis:
   js:
     js/ctt-r-analysis.js: {}
   dependencies:
+    - core/jquery
     - core/drupal
+    - core/drupal.autocomplete
     - core/drupalSettings
     - core/once

@@ -53,7 +53,6 @@ final class CttRAnalysisApiTest extends BrowserTestBase {
     $this->drupalLogin($submitter);
     $this->drupalGet('/workflow/r-analysis');
     $this->assertSession()->statusCodeEquals(200);
-    $this->assertSession()->pageTextContains('No mocked data: this interface only uses real catalog entries, real study associations, and real backend execution responses.');
     $this->assertSession()->pageTextContains('Run R Analysis');
 
     $this->drupalGet('/workflow/api/repo/analytical-tools', [

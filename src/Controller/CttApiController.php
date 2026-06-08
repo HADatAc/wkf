@@ -3,10 +3,12 @@
 namespace Drupal\ctt\Controller;
 
 use Drupal\Core\Controller\ControllerBase;
+use Drupal\Component\Utility\Xss;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Drupal\ctt\Service\CttHascoClient;
+use Drupal\rep\Utils;
 
 /**
  * API proxy controller - sits between the CTT React editor and hascoapi.
@@ -513,6 +515,13 @@ class CttApiController extends ControllerBase {
       return FALSE;
     }
 
+    // Site administrators are allowed to maintain workflows regardless of
+    // original owner identifier, which prevents save deadlocks in shared
+    // editorial environments.
+    if ($this->currentUser()->hasPermission('administer site configuration')) {
+      return TRUE;
+    }
+
     $candidates = [];
 
     $currentEmail = $this->getCurrentUserEmail();
@@ -577,10 +586,75 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Canonical process URI representation for cache keys.
+   */
+  protected function normalizeProcessUriForCacheKey(string $processUri): string {
+    $normalized = trim($processUri);
+    if ($normalized === '') {
+      return '';
+    }
+
+    // Keep process owner cache resilient across '#/X' and '#X' variants.
+    return str_replace('#/', '#', $normalized);
+  }
+
+  /**
+   * Build equivalent URI variants used by different API clients.
+   */
+  protected function buildProcessUriVariants(string $processUri): array {
+    $uri = trim($processUri);
+    if ($uri === '' || !$this->isUri($uri)) {
+      return [];
+    }
+
+    $variants = [$uri];
+    if (strpos($uri, '#/') !== FALSE) {
+      $variants[] = str_replace('#/', '#', $uri);
+    }
+    elseif (strpos($uri, '#') !== FALSE) {
+      $variants[] = preg_replace('/#(?!\/)/', '#/', $uri, 1) ?? $uri;
+    }
+
+    $unique = [];
+    foreach ($variants as $candidate) {
+      $candidate = trim((string) $candidate);
+      if ($candidate !== '' && $this->isUri($candidate)) {
+        $unique[$candidate] = TRUE;
+      }
+    }
+
+    return array_keys($unique);
+  }
+
+  /**
+   * Resolve a process URI variant that exists in HASCO (best effort).
+   */
+  protected function resolveExistingProcessUriVariant(string $processUri): string {
+    $variants = $this->buildProcessUriVariants($processUri);
+    if (empty($variants)) {
+      return trim($processUri);
+    }
+
+    foreach ($variants as $variantUri) {
+      try {
+        $processObj = $this->hascoClient->getByUri($variantUri);
+        if (is_array($processObj) && empty($processObj['error'])) {
+          return $variantUri;
+        }
+      }
+      catch (\Throwable $ignored) {
+        // Try next variant.
+      }
+    }
+
+    return trim($processUri);
+  }
+
+  /**
    * State key for cached process owner e-mail.
    */
   protected function getProcessOwnerStateKey(string $processUri): string {
-    return 'ctt.process_owner_email.' . sha1($processUri);
+    return 'ctt.process_owner_email.' . sha1($this->normalizeProcessUriForCacheKey($processUri));
   }
 
   /**
@@ -591,15 +665,87 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Cache process ownership metadata and root task mapping when available.
+   */
+  protected function cacheProcessOwnershipContext(string $processUri, mixed $processEntity): void {
+    $normalizedProcessUri = trim($processUri);
+    if ($normalizedProcessUri === '' || !$this->isUri($normalizedProcessUri)) {
+      return;
+    }
+
+    $ownerEmail = $this->extractOwnerEmailFromEntity($processEntity);
+    if ($ownerEmail !== '') {
+      $this->setCachedProcessOwnerEmail($normalizedProcessUri, $ownerEmail);
+    }
+
+    $topTaskUri = '';
+    if (is_array($processEntity)) {
+      $topTaskUri = trim((string) ($processEntity['hasTopTaskUri'] ?? $processEntity['hasTopTask'] ?? ''));
+    }
+    elseif (is_object($processEntity)) {
+      $topTaskUri = trim((string) ($processEntity->hasTopTaskUri ?? $processEntity->hasTopTask ?? ''));
+    }
+
+    if ($this->isUri($topTaskUri)) {
+      $this->setCachedTaskProcessUri($topTaskUri, $normalizedProcessUri);
+    }
+  }
+
+  /**
+   * Cache task-to-process mappings from task list payloads.
+   */
+  protected function cacheTaskProcessMappings(mixed $tasks, string $processUri): void {
+    $normalizedProcessUri = trim($processUri);
+    if ($normalizedProcessUri === '' || !$this->isUri($normalizedProcessUri) || !is_array($tasks)) {
+      return;
+    }
+
+    foreach ($tasks as $task) {
+      $taskUri = '';
+      if (is_array($task)) {
+        $taskUri = trim((string) ($task['uri'] ?? $task['hasURI'] ?? ''));
+      }
+      elseif (is_object($task)) {
+        $taskUri = trim((string) ($task->uri ?? $task->hasURI ?? ''));
+      }
+
+      if ($this->isUri($taskUri)) {
+        $this->setCachedTaskProcessUri($taskUri, $normalizedProcessUri);
+      }
+    }
+  }
+
+  /**
+   * Backward-compatible alias for task-to-process cache writes.
+   */
+  protected function cacheTaskProcessUri(string $taskUri, string $processUri): void {
+    $this->setCachedTaskProcessUri($taskUri, $processUri);
+  }
+
+  /**
    * Persist process owner e-mail cache when available.
    */
   protected function setCachedProcessOwnerEmail(string $processUri, string $ownerEmail): void {
-    $normalizedProcessUri = trim($processUri);
     $normalizedOwnerEmail = trim($ownerEmail);
-    if ($normalizedProcessUri === '' || !$this->isUri($normalizedProcessUri) || $normalizedOwnerEmail === '') {
+    if ($normalizedOwnerEmail === '') {
       return;
     }
-    \Drupal::state()->set($this->getProcessOwnerStateKey($normalizedProcessUri), $normalizedOwnerEmail);
+
+    $variants = $this->buildProcessUriVariants($processUri);
+    if (empty($variants)) {
+      return;
+    }
+
+    foreach ($variants as $variantUri) {
+      \Drupal::state()->set($this->getProcessOwnerStateKey($variantUri), $normalizedOwnerEmail);
+    }
+  }
+
+  /**
+   * Backward-compatible alias for process owner cache writes.
+   */
+  protected function cacheProcessOwnerIdentifier(string $processUri, string $ownerIdentifier): void {
+    $this->setCachedProcessOwnerEmail($processUri, $ownerIdentifier);
   }
 
   /**
@@ -623,8 +769,13 @@ class CttApiController extends ControllerBase {
     if (is_array($taskEntity)) {
       $candidates = [
         $taskEntity['processUri'] ?? NULL,
+        $taskEntity['workflowUri'] ?? NULL,
+        $taskEntity['workflowuri'] ?? NULL,
+        $taskEntity['hasWorkflowUri'] ?? NULL,
         $taskEntity['hasProcessUri'] ?? NULL,
         $taskEntity['partOfProcessUri'] ?? NULL,
+        $taskEntity['partOfProcess'] ?? NULL,
+        $taskEntity['partOf'] ?? NULL,
         $taskEntity['hasSIRPartOf'] ?? NULL,
         $taskEntity['hasProcess'] ?? NULL,
         $taskEntity['process'] ?? NULL,
@@ -633,8 +784,13 @@ class CttApiController extends ControllerBase {
     elseif (is_object($taskEntity)) {
       $candidates = [
         $taskEntity->processUri ?? NULL,
+        $taskEntity->workflowUri ?? NULL,
+        $taskEntity->workflowuri ?? NULL,
+        $taskEntity->hasWorkflowUri ?? NULL,
         $taskEntity->hasProcessUri ?? NULL,
         $taskEntity->partOfProcessUri ?? NULL,
+        $taskEntity->partOfProcess ?? NULL,
+        $taskEntity->partOf ?? NULL,
         $taskEntity->hasSIRPartOf ?? NULL,
         $taskEntity->hasProcess ?? NULL,
         $taskEntity->process ?? NULL,
@@ -664,6 +820,86 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Extract a canonical HTTP(S) entity URI from mixed API payload shapes.
+   */
+  protected function extractEntityUri(mixed $entity): string {
+    $candidates = [];
+
+    if (is_array($entity)) {
+      $candidates = [
+        $entity['uri'] ?? NULL,
+        $entity['hasURI'] ?? NULL,
+        $entity['id'] ?? NULL,
+      ];
+    }
+    elseif (is_object($entity)) {
+      $candidates = [
+        $entity->uri ?? NULL,
+        $entity->hasURI ?? NULL,
+        $entity->id ?? NULL,
+      ];
+    }
+
+    foreach ($candidates as $candidate) {
+      if (!is_scalar($candidate)) {
+        continue;
+      }
+
+      $uri = trim((string) $candidate);
+      if ($this->isUri($uri)) {
+        return $uri;
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Infer process URI from request query/referrer context (best effort).
+   */
+  protected function extractProcessUriFromRequestContext(Request $request): string {
+    $candidates = [
+      (string) $request->query->get('processUri', ''),
+      (string) $request->query->get('workflowUri', ''),
+      (string) $request->query->get('workflowuri', ''),
+    ];
+
+    $referer = trim((string) $request->headers->get('referer', ''));
+    if ($referer !== '') {
+      $parts = parse_url($referer);
+      if (is_array($parts) && isset($parts['query'])) {
+        $query = [];
+        parse_str((string) $parts['query'], $query);
+        foreach (['processUri', 'workflowUri', 'workflowuri'] as $key) {
+          if (isset($query[$key]) && !is_array($query[$key])) {
+            $candidates[] = (string) $query[$key];
+          }
+        }
+      }
+    }
+
+    foreach ($candidates as $candidate) {
+      $value = trim((string) $candidate);
+      if ($value === '') {
+        continue;
+      }
+
+      if (strpos($value, '%') !== FALSE) {
+        $decoded = rawurldecode($value);
+        if (is_string($decoded) && trim($decoded) !== '') {
+          $value = trim($decoded);
+        }
+      }
+
+      if ($this->isUri($value)) {
+        return $this->resolveExistingProcessUriVariant($value);
+      }
+    }
+
+    return '';
+  }
+
+  /**
    * Resolve and cache process owner e-mail.
    */
   protected function resolveProcessOwnerEmail(string $processUri): string {
@@ -672,23 +908,34 @@ class CttApiController extends ControllerBase {
       return '';
     }
 
-    $ownerStateKey = $this->getProcessOwnerStateKey($normalizedProcessUri);
-    $cachedOwner = \Drupal::state()->get($ownerStateKey);
-    if (is_string($cachedOwner) && trim($cachedOwner) !== '') {
-      return trim($cachedOwner);
-    }
-
-    try {
-      $processObj = $this->hascoClient->getByUri($normalizedProcessUri);
-      $ownerEmail = $this->extractOwnerEmailFromEntity($processObj);
-      if ($ownerEmail !== '') {
-        $this->setCachedProcessOwnerEmail($normalizedProcessUri, $ownerEmail);
-      }
-      return $ownerEmail;
-    }
-    catch (\Throwable $ignored) {
+    $variants = $this->buildProcessUriVariants($normalizedProcessUri);
+    if (empty($variants)) {
       return '';
     }
+
+    foreach ($variants as $variantUri) {
+      $ownerStateKey = $this->getProcessOwnerStateKey($variantUri);
+      $cachedOwner = \Drupal::state()->get($ownerStateKey);
+      if (is_string($cachedOwner) && trim($cachedOwner) !== '') {
+        return trim($cachedOwner);
+      }
+    }
+
+    foreach ($variants as $variantUri) {
+      try {
+        $processObj = $this->hascoClient->getByUri($variantUri);
+        $ownerEmail = $this->extractOwnerEmailFromEntity($processObj);
+        if ($ownerEmail !== '') {
+          $this->setCachedProcessOwnerEmail($variantUri, $ownerEmail);
+          return $ownerEmail;
+        }
+      }
+      catch (\Throwable $ignored) {
+        // Try alternate URI variants.
+      }
+    }
+
+    return '';
   }
 
   /**
@@ -730,7 +977,19 @@ class CttApiController extends ControllerBase {
 
     $ownerIdentifier = $this->resolveProcessOwnerEmail($normalizedProcessUri);
     if ($ownerIdentifier === '') {
-      return $this->buildProcessOwnerRequiredResponse($normalizedProcessUri, 'process_owner_unresolved');
+      $fallbackOwner = $this->getCurrentUserEmail();
+      $canBootstrapOwner = $this->currentUser()->hasPermission('create ctt workflow')
+        || $this->currentUser()->hasPermission('edit ctt workflow')
+        || $this->currentUser()->hasPermission('administer ctt')
+        || $this->currentUser()->hasPermission('administer site configuration');
+
+      if ($fallbackOwner !== '' && $canBootstrapOwner) {
+        $this->setCachedProcessOwnerEmail($normalizedProcessUri, $fallbackOwner);
+        $ownerIdentifier = $fallbackOwner;
+      }
+      else {
+        return $this->buildProcessOwnerRequiredResponse($normalizedProcessUri, 'process_owner_unresolved');
+      }
     }
 
     if (!$this->ownerIdentifierMatchesCurrentUser($ownerIdentifier)) {
@@ -1325,6 +1584,81 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Collect persisted process URIs from study-process state associations.
+   *
+   * @return array<int, string>
+   */
+  protected function loadPersistedStudyProcessUris(): array {
+    try {
+      $names = \Drupal::database()->select('key_value', 'kv')
+        ->fields('kv', ['name'])
+        ->condition('collection', 'state')
+        ->condition('name', 'ctt.study_process.%', 'LIKE')
+        ->execute()
+        ->fetchCol();
+
+      if (!is_array($names) || empty($names)) {
+        return [];
+      }
+
+      $state = \Drupal::state();
+      $records = $state->getMultiple($names);
+      $uris = [];
+      $seen = [];
+
+      foreach ($names as $stateKey) {
+        $raw = $records[$stateKey] ?? NULL;
+        $uri = trim((string) $raw);
+        if (!$this->isUri($uri)) {
+          continue;
+        }
+
+        $cacheKey = $this->normalizeProcessUriForCacheKey($uri);
+        if (isset($seen[$cacheKey])) {
+          continue;
+        }
+
+        $seen[$cacheKey] = TRUE;
+        $uris[] = $uri;
+      }
+
+      return $uris;
+    }
+    catch (\Throwable $ignored) {
+      return [];
+    }
+  }
+
+  /**
+   * Best-effort process label resolution from process URI variants.
+   */
+  protected function resolveProcessLabelFromUri(string $processUri): string {
+    foreach ($this->buildProcessUriVariants($processUri) as $variantUri) {
+      try {
+        $entity = $this->hascoClient->getByUri($variantUri);
+      }
+      catch (\Throwable $ignored) {
+        continue;
+      }
+
+      if (is_array($entity)) {
+        $label = trim((string) ($entity['label'] ?? $entity['hasContent'] ?? ''));
+        if ($label !== '') {
+          return $label;
+        }
+      }
+      elseif (is_object($entity)) {
+        $label = trim((string) ($entity->label ?? $entity->hasContent ?? ''));
+        if ($label !== '') {
+          return $label;
+        }
+      }
+    }
+
+    return '';
+  }
+
+  /**
    * Normalize tags to a unique string list.
    *
    * @param mixed $rawTags
@@ -1649,6 +1983,11 @@ class CttApiController extends ControllerBase {
     try {
       $uri = $request->query->get('uri', '');
 
+      $resolvedUri = $this->resolveExistingProcessUriVariant((string) $uri);
+      if ($this->isUri($resolvedUri)) {
+        $uri = $resolvedUri;
+      }
+
       $ownerGuard = $this->enforceProcessOwnerForMutation((string) $uri);
       if ($ownerGuard instanceof JsonResponse) {
         return $ownerGuard;
@@ -1959,7 +2298,20 @@ class CttApiController extends ControllerBase {
     }
 
     if (!$this->isUri($taskProcessUri)) {
+      $contextProcessUri = $this->extractProcessUriFromRequestContext($request);
+      if ($this->isUri($contextProcessUri)) {
+        $taskProcessUri = $contextProcessUri;
+      }
+    }
+
+    if (!$this->isUri($taskProcessUri)) {
       return $this->buildTaskOwnerRequiredResponse(trim((string) ($data['uri'] ?? '')), 'task_process_unresolved');
+    }
+
+    $resolvedTaskProcessUri = $this->resolveExistingProcessUriVariant($taskProcessUri);
+    if ($this->isUri($resolvedTaskProcessUri)) {
+      $taskProcessUri = $resolvedTaskProcessUri;
+      $data['processUri'] = $resolvedTaskProcessUri;
     }
 
     $ownerGuard = $this->enforceProcessOwnerForMutation($taskProcessUri);
@@ -1968,7 +2320,12 @@ class CttApiController extends ControllerBase {
     }
 
     try {
-      $result = $this->hascoClient->createElement('task', $data);
+      $payload = $data;
+      // processUri is internal workflow context used for ownership/mapping only.
+      // HASCO Task POJO rejects unknown fields, so do not forward it upstream.
+      unset($payload['processUri']);
+
+      $result = $this->hascoClient->createElement('task', $payload);
 
       $createdTaskUri = trim((string) ($data['uri'] ?? ''));
       if (is_array($result)) {
@@ -2275,6 +2632,158 @@ class CttApiController extends ControllerBase {
     catch (\Exception $e) {
       return new JsonResponse(['error' => $e->getMessage()], 500);
     }
+  }
+
+  /**
+   * GET /workflow/api/r-analysis/autocomplete/study?q=keyword
+   */
+  public function rAnalysisStudyAutocomplete(Request $request) {
+    $results = [];
+    $input = $request->query->get('q', '');
+    if (!is_string($input) || trim($input) === '') {
+      return new JsonResponse($results);
+    }
+
+    try {
+      $keyword = Xss::filter($input);
+      $api = \Drupal::service('rep.api_connector');
+      $studyList = $api->listByKeyword('study', $keyword, 10, 0);
+      $obj = json_decode($studyList);
+      $studies = [];
+      if ($obj && !empty($obj->isSuccessful) && isset($obj->body) && is_array($obj->body)) {
+        $studies = $obj->body;
+      }
+
+      foreach ($studies as $study) {
+        $uri = trim((string) ($study->uri ?? ''));
+        if (!$this->isUri($uri)) {
+          continue;
+        }
+
+        $label = trim((string) ($study->label ?? $uri));
+        $value = Utils::trimPreserveBracket(Utils::fieldToAutocomplete($uri, $label), 127);
+        $label = Utils::trimPreserveBracket($label, 127);
+
+        $results[] = [
+          'value' => $value,
+          'label' => $label,
+          'uri' => $uri,
+        ];
+      }
+    }
+    catch (\Throwable $ignored) {
+      return new JsonResponse([]);
+    }
+
+    return new JsonResponse($results);
+  }
+
+  /**
+   * GET /workflow/api/r-analysis/autocomplete/process?q=keyword
+   */
+  public function rAnalysisProcessAutocomplete(Request $request) {
+    $results = [];
+    $input = $request->query->get('q', '');
+    if (!is_string($input) || trim($input) === '') {
+      return new JsonResponse($results);
+    }
+
+    try {
+      $keyword = Xss::filter($input);
+      $keywordLower = strtolower(trim((string) $keyword));
+      $api = \Drupal::service('rep.api_connector');
+      $workflowList = $api->listByKeyword('workflow', $keyword, 10, 0);
+      $obj = json_decode($workflowList);
+      $workflows = [];
+      if ($obj && !empty($obj->isSuccessful) && isset($obj->body) && is_array($obj->body)) {
+        $workflows = $obj->body;
+      }
+
+      if (empty($workflows)) {
+        $processList = $api->listByKeyword('process', $keyword, 10, 0);
+        $processObj = json_decode($processList);
+        if ($processObj && !empty($processObj->isSuccessful) && isset($processObj->body) && is_array($processObj->body)) {
+          $workflows = $processObj->body;
+        }
+      }
+
+      $candidatesByKey = [];
+
+      foreach ($workflows as $workflow) {
+        $uri = trim((string) ($workflow->uri ?? ''));
+        if (!$this->isUri($uri)) {
+          continue;
+        }
+
+        $label = trim((string) ($workflow->label ?? $uri));
+        $candidateKey = $this->normalizeProcessUriForCacheKey($uri);
+        $candidatesByKey[$candidateKey] = [
+          'uri' => $uri,
+          'label' => $label,
+        ];
+      }
+
+      if (count($candidatesByKey) < 10) {
+        $persistedUris = $this->loadPersistedStudyProcessUris();
+        foreach ($persistedUris as $persistedUri) {
+          if (count($candidatesByKey) >= 10) {
+            break;
+          }
+
+          $candidateKey = $this->normalizeProcessUriForCacheKey($persistedUri);
+          if (isset($candidatesByKey[$candidateKey])) {
+            continue;
+          }
+
+          $uriSearchBlob = strtolower($persistedUri . ' ' . $candidateKey);
+          $label = '';
+
+          if ($keywordLower === '' || strpos($uriSearchBlob, $keywordLower) === FALSE) {
+            $label = $this->resolveProcessLabelFromUri($persistedUri);
+            if ($keywordLower !== '') {
+              $labelSearchBlob = strtolower($label);
+              if ($labelSearchBlob === '' || strpos($labelSearchBlob, $keywordLower) === FALSE) {
+                continue;
+              }
+            }
+          }
+
+          if ($label === '') {
+            $label = $this->resolveProcessLabelFromUri($persistedUri);
+          }
+          if ($label === '') {
+            $label = $persistedUri;
+          }
+
+          $candidatesByKey[$candidateKey] = [
+            'uri' => $persistedUri,
+            'label' => $label,
+          ];
+        }
+      }
+
+      foreach ($candidatesByKey as $candidate) {
+        $uri = trim((string) ($candidate['uri'] ?? ''));
+        if (!$this->isUri($uri)) {
+          continue;
+        }
+
+        $label = trim((string) ($candidate['label'] ?? $uri));
+        $value = Utils::trimPreserveBracket(Utils::fieldToAutocomplete($uri, $label), 127);
+        $label = Utils::trimPreserveBracket($label, 127);
+
+        $results[] = [
+          'value' => $value,
+          'label' => $label,
+          'uri' => $uri,
+        ];
+      }
+    }
+    catch (\Throwable $ignored) {
+      return new JsonResponse([]);
+    }
+
+    return new JsonResponse($results);
   }
 
   /**

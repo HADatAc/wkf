@@ -447,7 +447,10 @@ class CttEditorController extends ControllerBase {
 
     $toolsEndpoint = $drupalBaseUrl . 'workflow/api/repo/analytical-tools';
     $associationsEndpoint = $drupalBaseUrl . 'workflow/api/submission/associations';
+    $statusEndpoint = $drupalBaseUrl . 'workflow/api/submission/status';
     $executeEndpoint = $drupalBaseUrl . 'workflow/api/r-analysis/execute';
+    $studyAutocompleteEndpoint = $drupalBaseUrl . 'workflow/api/r-analysis/autocomplete/study';
+    $processAutocompleteEndpoint = $drupalBaseUrl . 'workflow/api/r-analysis/autocomplete/process';
 
     $initialStudyUri = trim((string) \Drupal::request()->query->get('studyUri', ''));
     $initialProcessUri = trim((string) \Drupal::request()->query->get('processUri', ''));
@@ -455,19 +458,18 @@ class CttEditorController extends ControllerBase {
     $markup = ''
       . '<div id="ctt-r-analysis-page" class="ctt-r-analysis-page">'
       . '  <p class="ctt-r-intro">' . Html::escape((string) $this->t('Run R analysis with real study/process context from PMSR.')) . '</p>'
-      . '  <p id="ctt-r-no-mock-note" class="alert alert-warning py-2">' . Html::escape((string) $this->t('No mocked data: this interface only uses real catalog entries, real study associations, and real backend execution responses.')) . '</p>'
       . '  <div id="ctt-r-feedback" class="alert d-none" role="alert"></div>'
       . '  <section class="card mb-3">'
       . '    <div class="card-header"><strong>' . Html::escape((string) $this->t('Execution Context')) . '</strong></div>'
       . '    <div class="card-body">'
       . '      <form id="ctt-r-analysis-form" class="row g-2 align-items-end">'
       . '        <div class="col-md-6">'
-      . '          <label for="ctt-r-study-uri" class="form-label">' . Html::escape((string) $this->t('Study URI')) . '</label>'
-      . '          <input type="url" id="ctt-r-study-uri" class="form-control" required value="' . Html::escape($initialStudyUri) . '" placeholder="http://example.org/study/...">'
+      . '          <label for="ctt-r-study-uri" class="form-label">' . Html::escape((string) $this->t('Study (search by name)')) . '</label>'
+      . '          <input type="text" id="ctt-r-study-uri" name="studyUri" class="form-control form-autocomplete" data-autocomplete-path="' . Html::escape($studyAutocompleteEndpoint) . '" required value="' . Html::escape($initialStudyUri) . '" placeholder="Type study name or paste URI" autocomplete="off">'
       . '        </div>'
       . '        <div class="col-md-6">'
-      . '          <label for="ctt-r-process-uri" class="form-label">' . Html::escape((string) $this->t('Process URI')) . '</label>'
-      . '          <input type="url" id="ctt-r-process-uri" class="form-control" required value="' . Html::escape($initialProcessUri) . '" placeholder="http://example.org/workflow/...">'
+      . '          <label for="ctt-r-process-uri" class="form-label">' . Html::escape((string) $this->t('Process (search by name)')) . '</label>'
+      . '          <input type="text" id="ctt-r-process-uri" name="processUri" class="form-control form-autocomplete" data-autocomplete-path="' . Html::escape($processAutocompleteEndpoint) . '" required value="' . Html::escape($initialProcessUri) . '" placeholder="Type process name or paste URI" autocomplete="off">'
       . '        </div>'
       . '        <div class="col-md-8">'
       . '          <label for="ctt-r-tool-uri" class="form-label">' . Html::escape((string) $this->t('R Tool (from real repository)')) . '</label>'
@@ -506,6 +508,7 @@ class CttEditorController extends ControllerBase {
       . '          <button type="button" id="ctt-r-load-context" class="btn btn-outline-primary btn-sm">' . Html::escape((string) $this->t('Load Real Context')) . '</button>'
       . '          <button type="submit" id="ctt-r-run-analysis" class="btn btn-success btn-sm">' . Html::escape((string) $this->t('Run R Analysis')) . '</button>'
       . '          <button type="button" id="ctt-r-copy-payload" class="btn btn-outline-secondary btn-sm">' . Html::escape((string) $this->t('Copy Request Payload')) . '</button>'
+      . '          <button type="button" id="ctt-r-download-log" class="btn btn-outline-secondary btn-sm" disabled>' . Html::escape((string) $this->t('Download Execution Log')) . '</button>'
       . '          <button type="button" id="ctt-r-clear-saved-context" class="btn btn-outline-danger btn-sm">' . Html::escape((string) $this->t('Clear Saved Context')) . '</button>'
       . '        </div>'
       . '      </form>'
@@ -524,7 +527,6 @@ class CttEditorController extends ControllerBase {
       . '      <pre id="ctt-r-response-output" class="ctt-r-response-output">' . Html::escape((string) $this->t('No execution yet.')) . '</pre>'
       . '    </div>'
       . '  </section>'
-      . '  <p class="mt-2 mb-0"><strong>' . Html::escape((string) $this->t('Execution API')) . ':</strong> <code>' . Html::escape($executeEndpoint) . '</code></p>'
       . '</div>';
 
     return [
@@ -538,7 +540,10 @@ class CttEditorController extends ControllerBase {
           'cttRAnalysis' => [
             'toolsEndpoint' => $toolsEndpoint,
             'associationsEndpoint' => $associationsEndpoint,
+            'statusEndpoint' => $statusEndpoint,
             'executeEndpoint' => $executeEndpoint,
+            'studyAutocompleteEndpoint' => $studyAutocompleteEndpoint,
+            'processAutocompleteEndpoint' => $processAutocompleteEndpoint,
             'initialStudyUri' => $initialStudyUri,
             'initialProcessUri' => $initialProcessUri,
           ],

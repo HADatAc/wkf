@@ -295,6 +295,26 @@ ctt.api.r_analysis.execute:
   options:
     no_cache: TRUE
 
+ctt.api.r_analysis.study_autocomplete:
+  path: '/workflow/api/r-analysis/autocomplete/study'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::rAnalysisStudyAutocomplete'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.r_analysis.process_autocomplete:
+  path: '/workflow/api/r-analysis/autocomplete/process'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::rAnalysisProcessAutocomplete'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
 ctt.api.submission.validate:
   path: '/workflow/api/submission/validate'
   defaults:

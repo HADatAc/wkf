@@ -844,46 +844,194 @@ class CttHascoClient {
   public function getTasksByProcess(string $process_uri): array {
     // Get the process to find its top task URI.
     $process = $this->getByUri($process_uri);
-    $top_task_uri = $process['hasTopTaskUri'] ?? $process['hasTopTask'] ?? NULL;
+    $top_task_uri = trim((string) ($process['hasTopTaskUri'] ?? $process['hasTopTask'] ?? ''));
 
-    if (!$top_task_uri) {
+    if ($top_task_uri === '') {
       return [];
     }
 
     // Recursively collect tasks starting from the top task.
-    return $this->collectTaskTree($top_task_uri);
+    $visited = [];
+    return $this->collectTaskTree($top_task_uri, $visited);
   }
 
   /**
    * Recursively collect tasks from a root task URI.
    */
   protected function collectTaskTree(string $task_uri, array &$visited = []): array {
-    if (in_array($task_uri, $visited)) {
+    $task_key = $this->normalizeUriForKey($task_uri);
+    if ($task_key === '' || isset($visited[$task_key])) {
       return []; // Prevent infinite loops.
     }
-    $visited[] = $task_uri;
+    $visited[$task_key] = TRUE;
 
-    try {
-      $task = $this->getByUri($task_uri);
-    }
-    catch (\Exception $e) {
+    $task = $this->resolveTaskByUri($task_uri);
+    if (!is_array($task)) {
       return [];
+    }
+
+    $resolved_task_uri = trim((string) ($task['uri'] ?? $task['hasURI'] ?? $task_uri));
+    $resolved_key = $this->normalizeUriForKey($resolved_task_uri);
+    if ($resolved_key !== '') {
+      $visited[$resolved_key] = TRUE;
     }
 
     $tasks = [$task];
 
     // Get subtask URIs.
-    $subtask_uris = $task['hasSubtaskUris'] ?? $task['hasSubtask'] ?? [];
-    if (is_string($subtask_uris)) {
-      $subtask_uris = [$subtask_uris];
+    $subtask_refs = $task['hasSubtaskUris'] ?? $task['hasSubtask'] ?? $task['hasSubtasks'] ?? [];
+    if (is_string($subtask_refs)) {
+      $subtask_refs = [$subtask_refs];
+    }
+    if (!is_array($subtask_refs)) {
+      return $tasks;
     }
 
-    foreach ($subtask_uris as $subtask_uri) {
+    foreach ($subtask_refs as $subtask_ref) {
+      $subtask_uri = '';
+      if (is_string($subtask_ref)) {
+        $subtask_uri = trim($subtask_ref);
+      }
+      elseif (is_array($subtask_ref)) {
+        $subtask_uri = trim((string) ($subtask_ref['uri'] ?? $subtask_ref['hasURI'] ?? $subtask_ref['taskUri'] ?? ''));
+      }
+      elseif (is_object($subtask_ref)) {
+        $subtask_uri = trim((string) ($subtask_ref->uri ?? $subtask_ref->hasURI ?? $subtask_ref->taskUri ?? ''));
+      }
+
+      if ($subtask_uri === '') {
+        continue;
+      }
+
       $subtasks = $this->collectTaskTree($subtask_uri, $visited);
       $tasks = array_merge($tasks, $subtasks);
     }
 
     return $tasks;
+  }
+
+  /**
+   * Generate URI variants for task lookup (#foo <-> #/foo).
+   */
+  protected function taskUriVariants(string $task_uri): array {
+    $task_uri = trim($task_uri);
+    if ($task_uri === '') {
+      return [];
+    }
+
+    $variants = [$task_uri];
+
+    if (strpos($task_uri, '#/') !== FALSE) {
+      $variants[] = str_replace('#/', '#', $task_uri);
+    }
+    elseif (strpos($task_uri, '#') !== FALSE) {
+      $variants[] = preg_replace('/#(?!\/)/', '#/', $task_uri, 1) ?? $task_uri;
+    }
+
+    $variants = array_map('trim', $variants);
+    $variants = array_filter($variants, function ($value) {
+      return $value !== '';
+    });
+
+    return array_values(array_unique($variants));
+  }
+
+  /**
+   * Resolve a task URI with best-effort fallbacks.
+   */
+  protected function resolveTaskByUri(string $task_uri): ?array {
+    $task_uri = trim($task_uri);
+    if ($task_uri === '') {
+      return NULL;
+    }
+
+    foreach ($this->taskUriVariants($task_uri) as $candidate_uri) {
+      try {
+        $task = $this->getByUri($candidate_uri);
+      }
+      catch (\Throwable $e) {
+        $task = [];
+      }
+
+      if (is_array($task) && empty($task['error']) && $this->isTaskEntity($task)) {
+        if (empty($task['uri']) && empty($task['hasURI'])) {
+          $task['uri'] = $candidate_uri;
+        }
+        return $task;
+      }
+    }
+
+    // Last-resort fallback: scan paginated task list and match normalized URI.
+    $target_key = $this->normalizeUriForKey($task_uri);
+    if ($target_key === '') {
+      return NULL;
+    }
+
+    $page_size = 200;
+    $max_pages = 20;
+
+    for ($page = 0; $page < $max_pages; $page++) {
+      $offset = $page * $page_size;
+
+      try {
+        $list_response = $this->listTasks($page_size, $offset);
+      }
+      catch (\Throwable $e) {
+        break;
+      }
+
+      $list = $list_response;
+      if (is_array($list_response) && array_key_exists('body', $list_response)) {
+        $list = $list_response['body'];
+      }
+
+      if (!is_array($list) || count($list) === 0) {
+        break;
+      }
+
+      foreach ($list as $candidate) {
+        if (is_object($candidate)) {
+          $candidate = (array) $candidate;
+        }
+        if (!is_array($candidate) || !$this->isTaskEntity($candidate)) {
+          continue;
+        }
+
+        $candidate_uri = trim((string) ($candidate['uri'] ?? $candidate['hasURI'] ?? ''));
+        if ($candidate_uri === '') {
+          continue;
+        }
+
+        if ($this->normalizeUriForKey($candidate_uri) !== $target_key) {
+          continue;
+        }
+
+        try {
+          $resolved = $this->getByUri($candidate_uri);
+          if (is_array($resolved) && empty($resolved['error']) && $this->isTaskEntity($resolved)) {
+            return $resolved;
+          }
+        }
+        catch (\Throwable $e) {
+          // Fallback to the listed shape below.
+        }
+
+        // Keep behavior consistent with getByUri task enrichment.
+        $candidate = $this->enrichTaskRequiredInstruments($candidate);
+        $candidate = $this->applyTaskInstrumentOverride($candidate, $candidate_uri);
+        if (empty($candidate['uri']) && empty($candidate['hasURI'])) {
+          $candidate['uri'] = $candidate_uri;
+        }
+
+        return $candidate;
+      }
+
+      if (count($list) < $page_size) {
+        break;
+      }
+    }
+
+    return NULL;
   }
 
   // ================================================================
@@ -958,11 +1106,123 @@ class CttHascoClient {
   // ================================================================
 
   /**
+   * Resolve current authenticated user e-mail (empty when unavailable).
+   */
+  protected function getCurrentUserEmail(): string {
+    try {
+      $account = \Drupal::currentUser();
+      if ((string) $account->id() === '0') {
+        return '';
+      }
+
+      $user = \Drupal\user\Entity\User::load($account->id());
+      if ($user && is_string($user->getEmail())) {
+        return trim((string) $user->getEmail());
+      }
+    }
+    catch (\Throwable $ignored) {
+      // Keep empty fallback.
+    }
+
+    return '';
+  }
+
+  /**
+   * Normalize mixed list response payloads into an array of arrays.
+   */
+  protected function normalizeInstrumentListPayload(mixed $payload): array {
+    $raw = $payload;
+    if (is_array($raw) && array_key_exists('body', $raw)) {
+      $raw = $raw['body'];
+    }
+
+    if (!is_array($raw)) {
+      return [];
+    }
+
+    $normalized = [];
+    foreach ($raw as $item) {
+      if (is_array($item)) {
+        $normalized[] = $item;
+      }
+      elseif (is_object($item)) {
+        $normalized[] = (array) $item;
+      }
+    }
+
+    return $normalized;
+  }
+
+  /**
+   * Fallback instrument listing through REP connector endpoints.
+   */
+  protected function listInstrumentsViaRepConnector(int $page_size, int $offset): array {
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return [];
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+
+      $list = [];
+      $manager_email = $this->getCurrentUserEmail();
+      if ($manager_email !== '') {
+        $raw = $api->listByManagerEmail('instrument', $manager_email, $page_size, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByManagerEmail');
+        $list = $this->normalizeInstrumentListPayload($parsed);
+      }
+
+      if (!empty($list)) {
+        return $list;
+      }
+
+      // Compatibility fallback: list by keyword for branches where managerEmail
+      // filtering or user ownership metadata is inconsistent.
+      $raw = $api->listByKeyword('instrument', '_', $page_size, $offset);
+      $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+      return $this->normalizeInstrumentListPayload($parsed);
+    }
+    catch (\Throwable $e) {
+      $this->logger->warning('Instrument fallback via REP failed: @message', [
+        '@message' => $e->getMessage(),
+      ]);
+      return [];
+    }
+  }
+
+  /**
    * List instruments with pagination.
    */
   public function listInstruments(int $page_size = 50, int $offset = 0): array {
     $endpoint = '/hascoapi/api/instrument/elements/' . $page_size . '/' . $offset;
-    return $this->request('GET', $endpoint);
+    $primary_error = '';
+
+    try {
+      $response = $this->request('GET', $endpoint);
+      $normalized = $this->normalizeInstrumentListPayload($response);
+      if (!empty($normalized)) {
+        return $normalized;
+      }
+
+      if (is_array($response) && (($response['isSuccessful'] ?? NULL) === FALSE)) {
+        $primary_error = trim((string) ($response['body'] ?? ''));
+      }
+    }
+    catch (\Throwable $e) {
+      $primary_error = trim($e->getMessage());
+    }
+
+    $fallback = $this->listInstrumentsViaRepConnector($page_size, $offset);
+    if (!empty($fallback)) {
+      if ($primary_error !== '') {
+        $this->logger->warning('Instrument list fallback activated after HASCOAPI failure: @message', [
+          '@message' => $primary_error,
+        ]);
+      }
+      return $fallback;
+    }
+
+    return [];
   }
 
   /**
