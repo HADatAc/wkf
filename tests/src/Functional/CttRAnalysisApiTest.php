@@ -35,6 +35,7 @@ final class CttRAnalysisApiTest extends BrowserTestBase {
 
     $accessOnly = $this->createUser(['access ctt editor']);
     $submitter = $this->createUser(['submit ctt workflow']);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $submitter->getEmail());
 
     $this->drupalLogin($accessOnly);
     $this->drupalGet('/workflow/r-analysis');
@@ -168,6 +169,7 @@ final class CttRAnalysisApiTest extends BrowserTestBase {
     $processUri = 'http://example.org/workflow/r-analysis-live';
 
     $submitter = $this->createUser(['submit ctt workflow']);
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $submitter->getEmail());
     $this->drupalLogin($submitter);
 
     $this->drupalGet('/workflow/api/repo/analytical-tools', [
@@ -204,7 +206,10 @@ final class CttRAnalysisApiTest extends BrowserTestBase {
         'studyUri' => $studyUri,
         'processUri' => $processUri,
         'toolUri' => $toolUri,
-        'arguments' => Json::encode(['iterations' => 10]),
+        'arguments' => Json::encode([
+          'iterations' => 10,
+          'rscriptArgs' => ['http://example.org/dataset/live-v1.csv'],
+        ]),
       ],
     ]);
 
