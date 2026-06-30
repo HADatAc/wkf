@@ -19,6 +19,51 @@ use Drupal\Core\Render\Markup;
 class CttEditorController extends ControllerBase {
 
   /**
+   * Persist study workflow association in both latest and historical keys.
+   */
+  protected function persistStudyProcessAssociation(string $studyUri, string $processUri): void {
+    $studyUri = trim($studyUri);
+    $processUri = trim($processUri);
+    if ($studyUri === '' || $processUri === '') {
+      return;
+    }
+
+    $studyHash = sha1($studyUri);
+    $state = \Drupal::state();
+    $state->set('ctt.study_process.' . $studyHash, $processUri);
+
+    $existing = $state->get('ctt.study_processes.' . $studyHash, []);
+    if (is_string($existing) && trim($existing) !== '') {
+      $decoded = json_decode($existing, TRUE);
+      if (is_array($decoded)) {
+        $existing = $decoded;
+      }
+      else {
+        $existing = array_map('trim', explode(',', $existing));
+      }
+    }
+
+    if (!is_array($existing)) {
+      $existing = [];
+    }
+
+    $normalized = [];
+    foreach ($existing as $candidate) {
+      if (!is_scalar($candidate)) {
+        continue;
+      }
+
+      $candidate = trim((string) $candidate);
+      if ($candidate !== '') {
+        $normalized[$candidate] = TRUE;
+      }
+    }
+
+    $normalized[$processUri] = TRUE;
+    $state->set('ctt.study_processes.' . $studyHash, array_keys($normalized));
+  }
+
+  /**
    * @var \Drupal\Core\Config\ConfigFactoryInterface
    */
   protected $configFactory;
@@ -214,7 +259,7 @@ class CttEditorController extends ControllerBase {
     }
 
     if ($processUri !== NULL && trim($processUri) !== '') {
-      \Drupal::state()->set('ctt.study_process.' . sha1($decodedStudyUri), $processUri);
+      $this->persistStudyProcessAssociation($decodedStudyUri, $processUri);
     }
 
     $statusKey = 'ctt.study_status.' . sha1($decodedStudyUri);
@@ -628,11 +673,27 @@ class CttEditorController extends ControllerBase {
       }
     }
 
-    if (!empty($study_uri) && !empty($process_uri)) {
-      \Drupal::state()->set('ctt.study_process.' . sha1($study_uri), (string) $process_uri);
+    $resolvedProcessUri = $process_uri ? rawurldecode((string) $process_uri) : NULL;
+    if (!empty($resolvedProcessUri) && \Drupal::hasService('ctt.hasco_client')) {
+      try {
+        $processProbe = \Drupal::service('ctt.hasco_client')->getByUri($resolvedProcessUri);
+        if (!is_array($processProbe) || !empty($processProbe['error'])) {
+          $this->messenger()->addWarning($this->t('Requested workflow process was not found. Opening CTT in create mode so you can create the process first.'));
+          $process_uri = NULL;
+          $resolvedProcessUri = NULL;
+          $isExecutionMode = FALSE;
+          $isSubmissionMode = FALSE;
+          $isCreateMode = TRUE;
+        }
+      }
+      catch (\Throwable $ignored) {
+        // Keep requested URI untouched when API is temporarily unavailable.
+      }
     }
 
-    $resolvedProcessUri = $process_uri ? rawurldecode((string) $process_uri) : NULL;
+    if (!empty($study_uri) && !empty($resolvedProcessUri)) {
+      $this->persistStudyProcessAssociation($study_uri, (string) $resolvedProcessUri);
+    }
 
     $encodedDaUri = \Drupal::request()->query->get('daUri');
     $encodedDataFileUri = \Drupal::request()->query->get('dataFileUri');
@@ -718,6 +779,7 @@ class CttEditorController extends ControllerBase {
       'hascoApiUrl' => $drupal_base_url . 'workflow',
       'defaultNamespaceUrl' => $default_namespace_url,
       'csrfToken' => $csrf_token,
+      'connectionTimeoutMs' => 10000,
       'mode' => $editorMode,
       'readOnlyPreview' => !empty($workflowAccess['readOnlyPreview']),
       'processUri' => $resolvedProcessUri,

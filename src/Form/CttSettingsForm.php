@@ -11,6 +11,26 @@ use Drupal\Core\Form\FormStateInterface;
 class CttSettingsForm extends ConfigFormBase {
 
   /**
+   * Check whether host points to loopback aliases.
+   */
+  protected function isLocalhostHost(?string $host): bool {
+    $normalized = strtolower(trim((string) $host));
+    return $normalized === 'localhost' || $normalized === '127.0.0.1' || $normalized === '::1';
+  }
+
+  /**
+   * Check whether URL host points to localhost.
+   */
+  protected function isLocalhostUrl(string $url): bool {
+    $host = parse_url(trim($url), PHP_URL_HOST);
+    if (!is_string($host) || $host === '') {
+      return FALSE;
+    }
+
+    return $this->isLocalhostHost($host);
+  }
+
+  /**
    * {@inheritdoc}
    */
   protected function getEditableConfigNames() {
@@ -47,8 +67,26 @@ class CttSettingsForm extends ConfigFormBase {
       '#markup' => $rep_url !== ''
         ? $this->t('Using REP api_url: <strong>@url</strong>', ['@url' => $rep_url])
         : $this->t('Using REP api_url: <strong>(not configured)</strong>'),
-      '#description' => $this->t('CTT always uses the same API base URL configured in the REP module.'),
+      '#description' => $this->t('CTT uses REP api_url by default. Environment variables PMSR_HASCOAPI_URL or HASCOAPI_URL, when set, override REP for runtime calls.'),
     ];
+
+    $requestHost = '';
+    $request = \Drupal::requestStack()->getCurrentRequest();
+    if ($request) {
+      $requestHost = (string) $request->getHost();
+    }
+
+    if ($rep_url !== '' && $this->isLocalhostUrl($rep_url) && !$this->isLocalhostHost($requestHost)) {
+      $form['api_url_warning'] = [
+        '#type' => 'item',
+        '#markup' => '<div class="messages messages--warning">'
+          . $this->t('Distributed deployment warning: REP api_url is set to localhost (@url), but this site is being accessed via host @host. Configure a routable HASCOAPI host to prevent CTT connection loops.', [
+            '@url' => $rep_url,
+            '@host' => $requestHost !== '' ? $requestHost : '(unknown)',
+          ])
+          . '</div>',
+      ];
+    }
 
     $form['jwt_key_id'] = [
       '#type' => 'key_select',

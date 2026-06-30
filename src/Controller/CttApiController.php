@@ -2006,8 +2006,23 @@ class CttApiController extends ControllerBase {
    */
   public function getProcessTree(Request $request) {
     try {
-      $uri = $request->query->get('uri', '');
+      $uri = trim((string) $request->query->get('uri', ''));
+      if (!$this->isUri($uri)) {
+        return new JsonResponse([
+          'error' => 'Missing or invalid process URI.',
+          'requestedUri' => $uri,
+        ], 400);
+      }
+
       $process = $this->hascoClient->getByUri($uri);
+      if (is_array($process) && !empty($process['error'])) {
+        return new JsonResponse([
+          'error' => 'Workflow process was not found in HASCOAPI.',
+          'details' => (string) $process['error'],
+          'requestedUri' => $uri,
+        ], 404);
+      }
+
       $tasks = $this->hascoClient->getTasksByProcess($uri);
 
       if (is_array($process) && $this->isUri(trim((string) $uri))) {

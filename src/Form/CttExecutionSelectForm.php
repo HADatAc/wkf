@@ -8,6 +8,51 @@ use Drupal\Core\Url;
 
 class CttExecutionSelectForm extends FormBase {
 
+  /**
+   * Persist study workflow association in both latest and historical keys.
+   */
+  protected function persistStudyProcessAssociation(string $studyUri, string $processUri): void {
+    $studyUri = trim($studyUri);
+    $processUri = trim($processUri);
+    if ($studyUri === '' || $processUri === '') {
+      return;
+    }
+
+    $studyHash = sha1($studyUri);
+    $state = \Drupal::state();
+    $state->set('ctt.study_process.' . $studyHash, $processUri);
+
+    $existing = $state->get('ctt.study_processes.' . $studyHash, []);
+    if (is_string($existing) && trim($existing) !== '') {
+      $decoded = json_decode($existing, TRUE);
+      if (is_array($decoded)) {
+        $existing = $decoded;
+      }
+      else {
+        $existing = array_map('trim', explode(',', $existing));
+      }
+    }
+
+    if (!is_array($existing)) {
+      $existing = [];
+    }
+
+    $normalized = [];
+    foreach ($existing as $candidate) {
+      if (!is_scalar($candidate)) {
+        continue;
+      }
+
+      $candidate = trim((string) $candidate);
+      if ($candidate !== '') {
+        $normalized[$candidate] = TRUE;
+      }
+    }
+
+    $normalized[$processUri] = TRUE;
+    $state->set('ctt.study_processes.' . $studyHash, array_keys($normalized));
+  }
+
   public function getFormId(): string {
     return 'ctt_execution_select_form';
   }
@@ -111,7 +156,7 @@ class CttExecutionSelectForm extends FormBase {
     // Persist association locally (Drupal-only) so future runs can be inferred by study.
     $decodedStudyUri = base64_decode($studyuri);
     if (!empty($decodedStudyUri) && !empty($processUri)) {
-      \Drupal::state()->set('ctt.study_process.' . sha1($decodedStudyUri), $processUri);
+      $this->persistStudyProcessAssociation($decodedStudyUri, $processUri);
     }
 
     $form_state->setRedirect('ctt.execution_create', ['studyuri' => $studyuri], [

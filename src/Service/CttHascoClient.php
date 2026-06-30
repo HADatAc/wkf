@@ -70,6 +70,13 @@ class CttHascoClient {
   protected $namespace = NULL;
 
   /**
+   * Cached map of legacy workflow source URIs to materialized workflow URIs.
+   *
+   * @var array<string, string>|null
+   */
+  protected $workflowUriAliasMap = NULL;
+
+  /**
    * Constructs a CttHascoClient.
    */
   public function __construct(
@@ -85,10 +92,90 @@ class CttHascoClient {
   }
 
   /**
+   * Normalize and validate candidate API URL.
+   */
+  protected function normalizeApiBaseUrl(string $candidate): string {
+    $url = trim($candidate);
+    if ($url === '') {
+      return '';
+    }
+
+    if (strpos($url, 'http://x.x.x.x:9000') !== FALSE) {
+      return '';
+    }
+
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+      return '';
+    }
+
+    return rtrim($url, '/');
+  }
+
+  /**
+   * Resolve optional API URL override from environment variables.
+   */
+  protected function getEnvironmentApiUrl(): string {
+    foreach (['PMSR_HASCOAPI_URL', 'HASCOAPI_URL'] as $envName) {
+      $value = getenv($envName);
+      if (!is_string($value)) {
+        continue;
+      }
+
+      $normalized = $this->normalizeApiBaseUrl($value);
+      if ($normalized !== '') {
+        return $normalized;
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Check whether a host points to loopback aliases.
+   */
+  protected function isLocalhostHost(?string $host): bool {
+    $normalized = strtolower(trim((string) $host));
+    return $normalized === 'localhost' || $normalized === '127.0.0.1' || $normalized === '::1';
+  }
+
+  /**
+   * Check whether API URL targets localhost.
+   */
+  protected function isLocalhostApiUrl(string $url): bool {
+    $host = parse_url($url, PHP_URL_HOST);
+    if (!is_string($host) || $host === '') {
+      return FALSE;
+    }
+
+    return $this->isLocalhostHost($host);
+  }
+
+  /**
+   * Determine if current request originates from localhost.
+   */
+  protected function isLocalRequestContext(): bool {
+    if (PHP_SAPI === 'cli') {
+      return TRUE;
+    }
+
+    try {
+      $request = \Drupal::requestStack()->getCurrentRequest();
+      if (!$request) {
+        return TRUE;
+      }
+
+      return $this->isLocalhostHost($request->getHost());
+    }
+    catch (\Throwable $e) {
+      // Be permissive when request context is unavailable.
+      return TRUE;
+    }
+  }
+
+  /**
    * Get the hascoapi base URL from configuration.
    */
   protected function getApiUrl(): string {
-    $config = $this->configFactory->get('ctt.settings');
     // CTT depends on REP and should always use the same API base URL.
     // We intentionally ignore ctt.settings.hasco_api_url to prevent
     // misconfiguration (e.g., localhost) from breaking production.
@@ -96,18 +183,37 @@ class CttHascoClient {
       throw new \RuntimeException('CTT requires the REP module to resolve hascoapi base URL.');
     }
 
+    $apiUrl = $this->getEnvironmentApiUrl();
+
     try {
-      $rep_url = (string) \Drupal\rep\Utils::configApiUrl();
-      $rep_url = trim($rep_url);
-      if ($rep_url !== '' && strpos($rep_url, 'http://x.x.x.x:9000') === FALSE && filter_var($rep_url, FILTER_VALIDATE_URL)) {
-        return rtrim($rep_url, '/');
+      if ($apiUrl === '') {
+        $repUrl = $this->normalizeApiBaseUrl((string) \Drupal\rep\Utils::configApiUrl());
+        if ($repUrl !== '') {
+          $apiUrl = $repUrl;
+        }
       }
     }
     catch (\Exception $e) {
       // Ignore and throw a config error below.
     }
 
-    throw new \RuntimeException('CTT is not configured: missing/invalid rep.settings.api_url. Configure the REP module settings.');
+    if ($apiUrl === '') {
+      throw new \RuntimeException('CTT is not configured: missing/invalid rep.settings.api_url. Configure the REP module settings with a routable HASCOAPI URL or set PMSR_HASCOAPI_URL.');
+    }
+
+    if ($this->isLocalhostApiUrl($apiUrl) && !$this->isLocalRequestContext()) {
+      throw new \RuntimeException('CTT is not configured for distributed deployment: HASCOAPI URL resolves to localhost. Configure rep.settings.api_url (or PMSR_HASCOAPI_URL) with a routable API host.');
+    }
+
+    static $localhostWarningLogged = FALSE;
+    if ($this->isLocalhostApiUrl($apiUrl) && !$localhostWarningLogged) {
+      $this->logger->warning('CTT is using localhost HASCOAPI URL (@url). This is valid only when Drupal and HASCOAPI run on the same machine.', [
+        '@url' => $apiUrl,
+      ]);
+      $localhostWarningLogged = TRUE;
+    }
+
+    return $apiUrl;
   }
 
   /**
@@ -204,6 +310,232 @@ class CttHascoClient {
       $this->logger->error('CTT API error: @message', ['@message' => $e->getMessage()]);
       throw $e;
     }
+  }
+
+  /**
+   * Normalize URI keys for resilient alias lookups.
+   */
+  protected function normalizeUriAliasKey(string $uri): string {
+    $normalized = trim(rawurldecode($uri));
+    if ($normalized === '') {
+      return '';
+    }
+
+    $normalized = str_replace('#/', '#', $normalized);
+    return strtolower(rtrim($normalized, '/'));
+  }
+
+  /**
+   * Build legacy workflow URI candidates from pmsr/http process URI formats.
+   */
+  protected function buildLegacyWorkflowSourceCandidates(string $uri): array {
+    $candidate = trim(rawurldecode($uri));
+    if ($candidate === '') {
+      return [];
+    }
+
+    $workflow_code = '';
+    $process_code = '';
+
+    if (preg_match('#^pmsr:/([^/]+)/PROC/([0-9]+)$#i', $candidate, $matches)) {
+      $workflow_code = trim((string) ($matches[1] ?? ''));
+      $process_code = trim((string) ($matches[2] ?? ''));
+    }
+    else {
+      $parts = parse_url($candidate);
+      $path = is_array($parts) ? trim((string) ($parts['path'] ?? ''), '/') : '';
+      if ($path !== '' && preg_match('#(?:^|/)ont/pmsr/([^/]+)/PROC/([0-9]+)$#i', $path, $matches)) {
+        $workflow_code = trim((string) ($matches[1] ?? ''));
+        $process_code = trim((string) ($matches[2] ?? ''));
+      }
+    }
+
+    if ($workflow_code === '') {
+      return [];
+    }
+
+    $workflow_variants = [$workflow_code];
+    if (preg_match('/^(.*)_C([0-9]{1,4})$/i', $workflow_code, $workflow_matches)) {
+      $workflow_stem = trim((string) ($workflow_matches[1] ?? ''));
+      $workflow_number = (int) ($workflow_matches[2] ?? 1);
+      if ($workflow_stem !== '') {
+        $workflow_variants[] = $workflow_stem . '_' . str_pad((string) max(1, $workflow_number), 4, '0', STR_PAD_LEFT);
+      }
+    }
+    elseif (preg_match('/^(.*)_([0-9]{4})$/', $workflow_code, $workflow_matches)) {
+      $workflow_stem = trim((string) ($workflow_matches[1] ?? ''));
+      $workflow_number = (int) ($workflow_matches[2] ?? 1);
+      if ($workflow_stem !== '') {
+        $workflow_variants[] = $workflow_stem . '_C' . str_pad((string) max(1, $workflow_number), 3, '0', STR_PAD_LEFT);
+      }
+    }
+
+    $process_variants = ['0001'];
+    $digits = preg_replace('/[^0-9]/', '', $process_code);
+    if ($digits !== '') {
+      $process_variants[] = str_pad((string) ((int) $digits), 4, '0', STR_PAD_LEFT);
+    }
+
+    $candidates = [];
+    foreach (array_values(array_unique($workflow_variants)) as $workflow_variant) {
+      $workflow_variant = trim($workflow_variant);
+      if ($workflow_variant === '') {
+        continue;
+      }
+
+      foreach (array_values(array_unique($process_variants)) as $process_variant) {
+        $candidates[] = 'pmsr:/' . $workflow_variant . '/PROC/' . $process_variant;
+        $candidates[] = 'http://pmsr.net/ont/pmsr/' . $workflow_variant . '/PROC/' . $process_variant;
+        $candidates[] = 'https://pmsr.net/ont/pmsr/' . $workflow_variant . '/PROC/' . $process_variant;
+      }
+    }
+
+    return array_values(array_unique(array_filter($candidates, function ($value) {
+      return trim((string) $value) !== '';
+    })));
+  }
+
+  /**
+   * Load alias map from latest materialized system workflow evidence.
+   */
+  protected function getMaterializedWorkflowAliasMap(): array {
+    if (is_array($this->workflowUriAliasMap)) {
+      return $this->workflowUriAliasMap;
+    }
+
+    $map = [];
+    $drupal_root = rtrim((string) \Drupal::root(), DIRECTORY_SEPARATOR);
+    $evidence_path = $drupal_root . DIRECTORY_SEPARATOR . 'modules' . DIRECTORY_SEPARATOR . 'custom' . DIRECTORY_SEPARATOR . 'evidence' . DIRECTORY_SEPARATOR . 'system_workflows_materialized_latest.json';
+
+    if (!is_file($evidence_path) || !is_readable($evidence_path)) {
+      $this->workflowUriAliasMap = $map;
+      return $map;
+    }
+
+    $raw = @file_get_contents($evidence_path);
+    if (!is_string($raw) || trim($raw) === '') {
+      $this->workflowUriAliasMap = $map;
+      return $map;
+    }
+
+    $decoded = json_decode($raw, TRUE);
+    if (!is_array($decoded)) {
+      $this->workflowUriAliasMap = $map;
+      return $map;
+    }
+
+    $rows = $decoded['materializedWorkflows'] ?? [];
+    if (!is_array($rows)) {
+      $this->workflowUriAliasMap = $map;
+      return $map;
+    }
+
+    foreach ($rows as $row) {
+      if (!is_array($row)) {
+        continue;
+      }
+
+      $source_uri = trim((string) ($row['sourceWorkflowUri'] ?? ''));
+      $workflow_uri = trim((string) ($row['workflowUri'] ?? ''));
+      if ($source_uri === '' || $workflow_uri === '') {
+        continue;
+      }
+
+      $target_key = $this->normalizeUriAliasKey($workflow_uri);
+      if ($target_key === '') {
+        continue;
+      }
+
+      $source_candidates = array_merge([$source_uri], $this->buildLegacyWorkflowSourceCandidates($source_uri));
+      foreach ($source_candidates as $source_candidate) {
+        $source_key = $this->normalizeUriAliasKey($source_candidate);
+        if ($source_key !== '') {
+          $map[$source_key] = $workflow_uri;
+        }
+      }
+
+      $map[$target_key] = $workflow_uri;
+    }
+
+    $this->workflowUriAliasMap = $map;
+    return $map;
+  }
+
+  /**
+   * Build ordered URI lookup candidates for resilient process resolution.
+   */
+  protected function buildUriLookupCandidates(string $uri): array {
+    $requested_uri = trim(rawurldecode($uri));
+    if ($requested_uri === '') {
+      return [];
+    }
+
+    $candidates = [$requested_uri];
+
+    if (strpos($requested_uri, '#/') !== FALSE) {
+      $candidates[] = str_replace('#/', '#', $requested_uri);
+    }
+    elseif (strpos($requested_uri, '#') !== FALSE) {
+      $candidates[] = preg_replace('/#(?!\/)/', '#/', $requested_uri, 1) ?? $requested_uri;
+    }
+
+    $candidates = array_merge($candidates, $this->buildLegacyWorkflowSourceCandidates($requested_uri));
+
+    $alias_map = $this->getMaterializedWorkflowAliasMap();
+    foreach ($candidates as $candidate_uri) {
+      $candidate_key = $this->normalizeUriAliasKey($candidate_uri);
+      if ($candidate_key !== '' && isset($alias_map[$candidate_key])) {
+        $candidates[] = $alias_map[$candidate_key];
+      }
+    }
+
+    $ordered = [];
+    foreach ($candidates as $candidate_uri) {
+      $candidate_uri = trim((string) $candidate_uri);
+      if ($candidate_uri === '') {
+        continue;
+      }
+      if (!isset($ordered[$candidate_uri])) {
+        $ordered[$candidate_uri] = TRUE;
+      }
+    }
+
+    return array_slice(array_keys($ordered), 0, 16);
+  }
+
+  /**
+   * Fetch and unwrap entity response for /hascoapi/api/uri/{uri}.
+   *
+   * Returns an empty array for soft misses (e.g. scalar body error) and
+   * populates $soft_error with a normalized message.
+   */
+  protected function fetchEntityByUri(string $uri, string &$soft_error = ''): array {
+    $soft_error = '';
+    $endpoint = '/hascoapi/api/uri/' . rawurlencode($uri);
+    $response = $this->request('GET', $endpoint);
+
+    $body = $response['body'] ?? $response;
+    if (is_array($body) && !empty($body)) {
+      return $body;
+    }
+
+    $error_text = 'Unexpected response from hascoapi /uri';
+    if (is_string($body) && trim($body) !== '') {
+      $error_text = trim($body);
+    }
+    elseif (is_scalar($body)) {
+      $error_text = (string) $body;
+    }
+
+    $is_successful = $response['isSuccessful'] ?? NULL;
+    $this->logger->warning('CTT API /uri returned non-object body for @uri (isSuccessful=@ok): @err', [
+      '@uri' => $uri,
+      '@ok' => $is_successful === NULL ? 'n/a' : ($is_successful ? 'true' : 'false'),
+      '@err' => $error_text,
+    ]);
+
+    $soft_error = $error_text;
+    return [];
   }
 
   /**
@@ -486,39 +818,76 @@ class CttHascoClient {
    * We unwrap and return just the body (the entity data).
    */
   public function getByUri(string $uri): array {
-    $endpoint = '/hascoapi/api/uri/' . rawurlencode($uri);
-    $response = $this->request('GET', $endpoint);
-
-    $body = $response['body'] ?? $response;
-    // hascoapi sometimes returns a wrapper where body is a scalar string (e.g. an error message).
-    // This service method is typed to return an array, so never return scalars.
-    if (!is_array($body)) {
-      $error_text = 'Unexpected response from hascoapi /uri';
-      if (is_string($body) && trim($body) !== '') {
-        $error_text = trim($body);
-      }
-      elseif (is_scalar($body)) {
-        $error_text = (string) $body;
-      }
-
-      $is_successful = $response['isSuccessful'] ?? NULL;
-      $this->logger->warning('CTT API /uri returned non-object body for @uri (isSuccessful=@ok): @err', [
-        '@uri' => $uri,
-        '@ok' => $is_successful === NULL ? 'n/a' : ($is_successful ? 'true' : 'false'),
-        '@err' => $error_text,
-      ]);
-
+    $requested_uri = trim($uri);
+    if ($requested_uri === '') {
       return [
         'uri' => $uri,
-        'error' => $error_text,
+        'error' => 'Missing URI',
       ];
     }
-    if (is_array($body) && $this->isTaskEntity($body)) {
-      $body = $this->enrichTaskRequiredInstruments($body);
-      $body = $this->applyTaskInstrumentOverride($body, $uri);
+
+    $candidates = $this->buildUriLookupCandidates($requested_uri);
+    if (empty($candidates)) {
+      return [
+        'uri' => $requested_uri,
+        'error' => 'Missing URI',
+      ];
     }
 
-    return $body;
+    $fallback_error = '';
+    $last_exception = NULL;
+
+    foreach ($candidates as $candidate_uri) {
+      $soft_error = '';
+      try {
+        $body = $this->fetchEntityByUri($candidate_uri, $soft_error);
+      }
+      catch (\Exception $e) {
+        // Preserve previous behavior for hard failures on the initial URI.
+        if ($candidate_uri === $requested_uri) {
+          throw $e;
+        }
+        $last_exception = $e;
+        continue;
+      }
+
+      if (!empty($body)) {
+        if ($candidate_uri !== $requested_uri) {
+          $this->logger->debug('CTT URI fallback resolved @requested to @resolved', [
+            '@requested' => $requested_uri,
+            '@resolved' => $candidate_uri,
+          ]);
+        }
+
+        if ($this->isTaskEntity($body)) {
+          $task_uri = trim((string) ($body['uri'] ?? $body['hasURI'] ?? $candidate_uri));
+          $body = $this->enrichTaskRequiredInstruments($body);
+          $body = $this->applyTaskInstrumentOverride($body, $task_uri);
+        }
+
+        return $body;
+      }
+
+      if ($fallback_error === '' && $soft_error !== '') {
+        $fallback_error = $soft_error;
+      }
+    }
+
+    if ($fallback_error !== '') {
+      return [
+        'uri' => $requested_uri,
+        'error' => $fallback_error,
+      ];
+    }
+
+    if ($last_exception instanceof \Exception) {
+      throw $last_exception;
+    }
+
+    return [
+      'uri' => $requested_uri,
+      'error' => 'Unexpected response from hascoapi /uri',
+    ];
   }
 
   /**

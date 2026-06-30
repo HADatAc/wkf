@@ -88,6 +88,96 @@
     return context;
   }
 
+  function installApiBootstrapProbeTimeoutGuard(settings) {
+    if (typeof window.fetch !== 'function') {
+      return;
+    }
+    if (window.__cttApiBootstrapProbeTimeoutGuardInstalled) {
+      return;
+    }
+
+    var hascoApiBase = String(settings && settings.hascoApiUrl ? settings.hascoApiUrl : '').trim();
+    var probePath = normalizePathname((hascoApiBase || '/workflow') + '/hascoapi/api/repo');
+    if (!probePath) {
+      return;
+    }
+
+    var requestedTimeout = parseInt(settings && settings.connectionTimeoutMs, 10);
+    var timeoutMs = (!isNaN(requestedTimeout) && requestedTimeout >= 3000)
+      ? Math.min(requestedTimeout, 12000)
+      : 8000;
+
+    window.__cttApiBootstrapProbeTimeoutGuardInstalled = true;
+
+    var originalFetch = window.fetch.bind(window);
+
+    function shouldGuardRequest(resource, init) {
+      var requestUrl = getRequestUrl(resource);
+      var requestPath = normalizePathname(requestUrl);
+      if (!requestPath || requestPath !== probePath) {
+        return false;
+      }
+
+      var method = 'GET';
+      if (init && typeof init.method === 'string' && init.method.trim() !== '') {
+        method = init.method;
+      }
+      else if (resource && typeof resource.method === 'string' && resource.method.trim() !== '') {
+        method = resource.method;
+      }
+
+      return String(method).trim().toUpperCase() === 'GET';
+    }
+
+    window.fetch = function (resource, init) {
+      if (!shouldGuardRequest(resource, init) || typeof AbortController !== 'function') {
+        return originalFetch(resource, init);
+      }
+
+      var requestInit = init ? Object.assign({}, init) : {};
+      var timeoutController = new AbortController();
+      var timeoutId = window.setTimeout(function () {
+        try {
+          timeoutController.abort();
+        }
+        catch (e) {
+          // Ignore abort errors.
+        }
+      }, timeoutMs);
+
+      var upstreamSignal = requestInit.signal || (resource && resource.signal ? resource.signal : null);
+      if (upstreamSignal && typeof upstreamSignal.addEventListener === 'function') {
+        if (upstreamSignal.aborted) {
+          timeoutController.abort();
+        }
+        else {
+          upstreamSignal.addEventListener('abort', function () {
+            try {
+              timeoutController.abort();
+            }
+            catch (e) {
+              // Ignore abort errors.
+            }
+          }, { once: true });
+        }
+      }
+
+      requestInit.signal = timeoutController.signal;
+
+      return originalFetch(resource, requestInit)
+        .finally(function () {
+          window.clearTimeout(timeoutId);
+        })
+        .catch(function (error) {
+          var name = error && error.name ? String(error.name) : '';
+          if (name === 'AbortError') {
+            window.__cttApiBootstrapProbeTimedOut = true;
+          }
+          throw error;
+        });
+    };
+  }
+
   function installSubmissionStatusBridge(settings) {
     if (!settings || !settings.submission || !toBooleanFlag(settings.submission.enabled)) {
       return;
@@ -215,6 +305,354 @@
     };
   }
 
+  function escapeHtml(value) {
+    var text = String(value || '');
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function hasProgressIndicator(scope) {
+    if (!scope || !scope.querySelector) {
+      return false;
+    }
+
+    return Boolean(scope.querySelector('.MuiCircularProgress-root, [role="progressbar"], .ctt-loading-indicator, .ajax-progress-throbber .throbber'));
+  }
+
+  function hasEditorSurfaceMarker(container) {
+    if (!container || !container.querySelector) {
+      return false;
+    }
+
+    return Boolean(container.querySelector('.react-flow, .react-flow__viewport, .react-flow__renderer, [class*="react-flow"]'));
+  }
+
+  function isConnectingToApi(container) {
+    if (!container) {
+      return false;
+    }
+
+    var text = String(container.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (text.indexOf('connecting to api') !== -1) {
+      return true;
+    }
+
+    if (hasProgressIndicator(container) && !hasEditorSurfaceMarker(container)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function pageHasConnectingHint() {
+    if (!document || !document.body) {
+      return false;
+    }
+
+    var bodyText = '';
+    if (typeof document.body.innerText === 'string' && document.body.innerText.trim() !== '') {
+      bodyText = document.body.innerText;
+    }
+    else {
+      bodyText = document.body.textContent || '';
+    }
+
+    var text = String(bodyText).replace(/\s+/g, ' ').trim().toLowerCase();
+    if (text.indexOf('connecting to api') !== -1) {
+      return true;
+    }
+
+    return hasProgressIndicator(document.body);
+  }
+
+  function installApiConnectionTimeoutGuard(container, settings) {
+    if (!container || container.__cttApiTimeoutGuardInstalled) {
+      return;
+    }
+
+    container.__cttApiTimeoutGuardInstalled = true;
+
+    var requestedTimeout = parseInt(settings && settings.connectionTimeoutMs, 10);
+    var timeoutMs = (!isNaN(requestedTimeout) && requestedTimeout >= 5000)
+      ? requestedTimeout
+      : 10000;
+
+    var startedAt = Date.now();
+    var finished = false;
+    var observer = null;
+    var intervalId = 0;
+    var hardTimeoutId = 0;
+
+    function cleanup() {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = 0;
+      }
+      if (hardTimeoutId) {
+        clearTimeout(hardTimeoutId);
+        hardTimeoutId = 0;
+      }
+      if (observer) {
+        observer.disconnect();
+        observer = null;
+      }
+    }
+
+    function renderTimeoutState() {
+      if (finished) {
+        return;
+      }
+
+      var elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      var processUri = settings && settings.processUri ? String(settings.processUri) : '';
+      var apiBase = settings && settings.apiBaseUrl ? String(settings.apiBaseUrl).replace(/\/+$/, '') : '';
+      var processTreeUrl = apiBase ? (apiBase + '/process/tree') : '';
+      if (processTreeUrl && processUri) {
+        processTreeUrl += '?uri=' + encodeURIComponent(processUri);
+      }
+
+      var readOnlyPreview = Boolean(settings && settings.readOnlyPreview);
+      var readOnlyHint = readOnlyPreview
+        ? '<p class="mb-2"><small>Read-only preview is active for this study/process context.</small></p>'
+        : '';
+
+      container.innerHTML = ''
+        + '<div class="alert alert-warning ctt-api-timeout" role="alert">'
+        + '  <h4 class="alert-heading mb-2">API connection timeout</h4>'
+        + '  <p class="mb-2">The editor stayed in <strong>Connecting to API...</strong> for ' + elapsedSeconds + 's and was stopped to avoid an infinite loop.</p>'
+        + readOnlyHint
+        + '  <div class="mb-2"><small>Process URI: ' + escapeHtml(processUri || 'n/a') + '</small></div>'
+        + (processTreeUrl ? ('  <div class="mb-3"><small>Diagnostic endpoint: ' + escapeHtml(processTreeUrl) + '</small></div>') : '')
+        + '  <button type="button" class="btn btn-sm btn-primary" data-ctt-retry-connection="1">Retry connection</button>'
+        + '</div>';
+
+      var retryButton = container.querySelector('[data-ctt-retry-connection="1"]');
+      if (retryButton) {
+        retryButton.addEventListener('click', function () {
+          window.location.reload();
+        });
+      }
+
+      finished = true;
+      cleanup();
+    }
+
+    function hasLoadedEditorSurface() {
+      if (!container) {
+        return false;
+      }
+
+      if (container.querySelector && container.querySelector('.ctt-api-timeout')) {
+        return true;
+      }
+
+      if (hasEditorSurfaceMarker(container)) {
+        return true;
+      }
+
+      var text = String(container.innerText || container.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+      if (text.indexOf('connecting to api') !== -1) {
+        return false;
+      }
+
+      if (text.indexOf('loading ctt workflow editor') !== -1) {
+        return false;
+      }
+
+      var nodeCount = container.querySelectorAll ? container.querySelectorAll('*').length : 0;
+      var interactiveCount = container.querySelectorAll
+        ? container.querySelectorAll('button, [role="button"], input, select, textarea, svg').length
+        : 0;
+
+      if (nodeCount >= 40 && interactiveCount >= 6) {
+        return true;
+      }
+
+      return text.length >= 240 && interactiveCount >= 4;
+    }
+
+    function pageLooksStuckConnecting() {
+      return pageHasConnectingHint();
+    }
+
+    function evaluateState() {
+      if (finished) {
+        return;
+      }
+
+      var connecting = isConnectingToApi(container);
+      var pageConnecting = pageLooksStuckConnecting();
+      var elapsed = Date.now() - startedAt;
+
+      // Avoid early completion: only decide pass/fail when timeout window is reached.
+      if (elapsed < timeoutMs) {
+        return;
+      }
+
+      if (connecting || pageConnecting) {
+        renderTimeoutState();
+        return;
+      }
+
+      if (hasLoadedEditorSurface()) {
+        finished = true;
+        cleanup();
+        return;
+      }
+
+      // Keep guard alive for a short grace window to catch late-rendered
+      // loading states that move outside the observed container subtree.
+      if (elapsed >= (timeoutMs + 3000)) {
+        renderTimeoutState();
+      }
+    }
+
+    intervalId = window.setInterval(evaluateState, 500);
+    observer = new MutationObserver(evaluateState);
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    });
+
+    // Absolute fallback for cases where the loading text is rendered outside
+    // the observed subtree or the app swaps roots unexpectedly.
+    hardTimeoutId = window.setTimeout(function () {
+      if (finished) {
+        return;
+      }
+
+      var pageStillConnecting = pageLooksStuckConnecting();
+      var containerStillConnecting = isConnectingToApi(container);
+
+      if (pageStillConnecting || containerStillConnecting || !hasLoadedEditorSurface()) {
+        renderTimeoutState();
+        return;
+      }
+
+      finished = true;
+      cleanup();
+    }, timeoutMs + 50);
+
+    window.setTimeout(evaluateState, 1200);
+  }
+
+  function installAbsoluteApiLoopBreaker(container, settings) {
+    if (!container || container.__cttAbsoluteLoopBreakerInstalled) {
+      return;
+    }
+
+    container.__cttAbsoluteLoopBreakerInstalled = true;
+
+    var requestedTimeout = parseInt(settings && settings.connectionTimeoutMs, 10);
+    var timeoutMs = (!isNaN(requestedTimeout) && requestedTimeout >= 5000)
+      ? (requestedTimeout + 4000)
+      : 14000;
+
+    var startedAt = Date.now();
+    var deadlineId = 0;
+    var intervalId = 0;
+    var resolved = false;
+
+    function cleanup() {
+      if (deadlineId) {
+        clearTimeout(deadlineId);
+        deadlineId = 0;
+      }
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = 0;
+      }
+    }
+
+    function hasExistingTimeoutMessage() {
+      return Boolean(document.querySelector('.ctt-api-timeout') || document.querySelector('.workflow-preview-timeout'));
+    }
+
+    function isLikelyLoaded() {
+      if (!container) {
+        return false;
+      }
+
+      if (hasEditorSurfaceMarker(container)) {
+        return true;
+      }
+
+      if (isConnectingToApi(container) || pageHasConnectingHint()) {
+        return false;
+      }
+
+      var nodeCount = container.querySelectorAll ? container.querySelectorAll('*').length : 0;
+      var interactiveCount = container.querySelectorAll
+        ? container.querySelectorAll('button, [role="button"], input, select, textarea, svg').length
+        : 0;
+
+      return nodeCount >= 60 && interactiveCount >= 8;
+    }
+
+    function renderForcedTimeout() {
+      if (resolved) {
+        return;
+      }
+
+      if (hasExistingTimeoutMessage() || isLikelyLoaded()) {
+        resolved = true;
+        cleanup();
+        return;
+      }
+
+      var elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      var processUri = settings && settings.processUri ? String(settings.processUri) : '';
+      var apiBase = settings && settings.apiBaseUrl ? String(settings.apiBaseUrl).replace(/\/+$/, '') : '';
+      var processTreeUrl = apiBase ? (apiBase + '/process/tree') : '';
+      if (processTreeUrl && processUri) {
+        processTreeUrl += '?uri=' + encodeURIComponent(processUri);
+      }
+
+      container.innerHTML = ''
+        + '<div class="alert alert-danger ctt-api-timeout ctt-api-timeout-hard" role="alert">'
+        + '  <h4 class="alert-heading mb-2">Editor bootstrap timeout</h4>'
+        + '  <p class="mb-2">The workflow editor remained in loading/connecting state for ' + elapsedSeconds + 's. The loop was interrupted to expose diagnostics.</p>'
+        + '  <div class="mb-2"><small>Process URI: ' + escapeHtml(processUri || 'n/a') + '</small></div>'
+        + (processTreeUrl ? ('  <div class="mb-3"><small>Diagnostic endpoint: ' + escapeHtml(processTreeUrl) + '</small></div>') : '')
+        + '  <button type="button" class="btn btn-sm btn-primary" data-ctt-retry-connection="1">Retry connection</button>'
+        + '</div>';
+
+      var retryButton = container.querySelector('[data-ctt-retry-connection="1"]');
+      if (retryButton) {
+        retryButton.addEventListener('click', function () {
+          window.location.reload();
+        });
+      }
+
+      resolved = true;
+      cleanup();
+    }
+
+    intervalId = window.setInterval(function () {
+      if (resolved) {
+        cleanup();
+        return;
+      }
+
+      if (hasExistingTimeoutMessage() || isLikelyLoaded()) {
+        resolved = true;
+        cleanup();
+      }
+    }, 1000);
+
+    deadlineId = window.setTimeout(renderForcedTimeout, timeoutMs);
+  }
+
   function normalizeControlText(element) {
     if (!element) {
       return '';
@@ -232,6 +670,36 @@
       return false;
     }
     return /\b(start simulation|start execution|run simulation|run workflow|run|resume|pause|stop|abort|step|execute|play)\b/.test(label);
+  }
+
+  function isMutatingActionLabel(label) {
+    if (!label) {
+      return false;
+    }
+
+    return /\b(save|submit|create|delete|remove|new task|new subtask|add task|add subtask|duplicate|publish|approve|reject|archive|import|upload)\b/.test(label);
+  }
+
+  function shouldDisableReadOnlyControl(control) {
+    if (!control) {
+      return false;
+    }
+
+    var label = normalizeControlText(control);
+    if (isExecutionActionLabel(label) || isMutatingActionLabel(label)) {
+      return true;
+    }
+
+    var actionHint = '';
+    if (control.getAttribute) {
+      actionHint = String(control.getAttribute('data-action') || control.getAttribute('data-testid') || '').trim().toLowerCase();
+    }
+
+    if (actionHint !== '' && /(save|submit|create|delete|remove|run|start|stop|resume|pause|abort|execute)/.test(actionHint)) {
+      return true;
+    }
+
+    return false;
   }
 
   function hideStartOverlayNearControl(control) {
@@ -256,6 +724,9 @@
     }
     var controls = root.querySelectorAll('button, [role="button"], a');
     controls.forEach(function (control) {
+      if (control.getAttribute && control.getAttribute('data-ctt-hidden-action') === '1') {
+        return;
+      }
       var label = normalizeControlText(control);
       if (!isExecutionActionLabel(label)) {
         return;
@@ -272,34 +743,28 @@
     });
   }
 
-  function blockReadOnlyEvent(event) {
-    if (!event) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    if (typeof event.stopImmediatePropagation === 'function') {
-      event.stopImmediatePropagation();
-    }
-  }
-
   function disableInteractiveControls(root) {
     if (!root || !root.querySelectorAll) {
       return;
     }
 
-    var controls = root.querySelectorAll('button, [role="button"], a, input, select, textarea, [contenteditable="true"], [tabindex]');
+    // Only disable mutating controls; keep navigation/inspection interactions active.
+    var controls = root.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], [contenteditable="true"]');
     controls.forEach(function (control) {
+      if (!shouldDisableReadOnlyControl(control)) {
+        return;
+      }
+
+      if (control.getAttribute && control.getAttribute('data-ctt-readonly-control') === '1') {
+        return;
+      }
+
       control.setAttribute('data-ctt-readonly-control', '1');
-      control.setAttribute('tabindex', '-1');
       control.style.pointerEvents = 'none';
+      control.setAttribute('aria-disabled', 'true');
 
       if (control.tagName === 'BUTTON' || control.tagName === 'INPUT' || control.tagName === 'SELECT' || control.tagName === 'TEXTAREA') {
         control.setAttribute('disabled', 'disabled');
-      }
-
-      if (control.tagName === 'A') {
-        control.setAttribute('aria-disabled', 'true');
       }
     });
   }
@@ -345,54 +810,30 @@
       container.setAttribute('data-ctt-readonly-reason', reasonCode);
     }
 
-    if ('inert' in container) {
-      container.inert = true;
-    }
-    else {
-      container.setAttribute('inert', '');
-    }
-
     ensureReadOnlyNotice(container, settings);
-
-    [
-      'click',
-      'dblclick',
-      'mousedown',
-      'mouseup',
-      'pointerdown',
-      'pointerup',
-      'touchstart',
-      'touchend',
-      'dragstart',
-      'drop',
-      'submit',
-      'contextmenu',
-    ].forEach(function (eventName) {
-      container.addEventListener(eventName, blockReadOnlyEvent, true);
-    });
-
-    var keyBlocker = function (event) {
-      if (event && event.target && container.contains(event.target)) {
-        blockReadOnlyEvent(event);
-      }
-    };
-
-    document.addEventListener('keydown', keyBlocker, true);
-    document.addEventListener('keyup', keyBlocker, true);
-    container.__cttReadOnlyKeyBlocker = keyBlocker;
 
     hideExecutionActionControls(container);
     disableInteractiveControls(container);
 
+    var rescanScheduled = false;
+    function scheduleReadOnlyRescan() {
+      if (rescanScheduled) {
+        return;
+      }
+      rescanScheduled = true;
+      window.setTimeout(function () {
+        rescanScheduled = false;
+        hideExecutionActionControls(container);
+        disableInteractiveControls(container);
+      }, 50);
+    }
+
     var observer = new MutationObserver(function () {
-      hideExecutionActionControls(container);
-      disableInteractiveControls(container);
+      scheduleReadOnlyRescan();
     });
     observer.observe(container, {
       childList: true,
-      subtree: true,
-      attributes: true,
-      characterData: true
+      subtree: true
     });
 
     [120, 350, 900, 1600].forEach(function (delay) {
@@ -432,6 +873,7 @@
         drupalSettings.ctt.workflowAccess = drupalSettings.ctt.workflowAccess || settings.workflowAccess || {};
         drupalSettings.ctt.workflowAccess.readOnlyPreview = readOnlyPreview;
 
+        installApiBootstrapProbeTimeoutGuard(settings);
         installSubmissionStatusBridge(settings);
 
         var maxAttempts = 50;
@@ -474,6 +916,9 @@
         window.addEventListener('resize', applyContainerSize, { passive: true });
         setTimeout(applyContainerSize, 50);
         setTimeout(applyContainerSize, 250);
+
+        // Backup watchdog: if initialization never completes, replace spinner with diagnostics.
+        installAbsoluteApiLoopBreaker(container, settings);
 
         /**
          * Wait for the UMD bundle to expose the global HASCOWorkflowEditor.
@@ -538,11 +983,13 @@
 
     if (typeof lib.mountApp === 'function') {
       lib.mountApp(container);
+      installApiConnectionTimeoutGuard(container, settings);
       if (readOnlyPreview) {
         enableReadOnlyPreview(container, settings);
       }
     } else if (typeof lib.mountWorkflowEditor === 'function') {
       lib.mountWorkflowEditor(container, {});
+      installApiConnectionTimeoutGuard(container, settings);
       if (readOnlyPreview) {
         enableReadOnlyPreview(container, settings);
       }

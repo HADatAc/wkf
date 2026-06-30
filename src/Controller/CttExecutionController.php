@@ -18,6 +18,51 @@ use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class CttExecutionController extends ControllerBase {
 
+  /**
+   * Persist study workflow association in both latest and historical keys.
+   */
+  protected function persistStudyProcessAssociation(string $studyUri, string $processUri): void {
+    $studyUri = trim($studyUri);
+    $processUri = trim($processUri);
+    if ($studyUri === '' || $processUri === '') {
+      return;
+    }
+
+    $studyHash = sha1($studyUri);
+    $state = \Drupal::state();
+    $state->set('ctt.study_process.' . $studyHash, $processUri);
+
+    $existing = $state->get('ctt.study_processes.' . $studyHash, []);
+    if (is_string($existing) && trim($existing) !== '') {
+      $decoded = json_decode($existing, TRUE);
+      if (is_array($decoded)) {
+        $existing = $decoded;
+      }
+      else {
+        $existing = array_map('trim', explode(',', $existing));
+      }
+    }
+
+    if (!is_array($existing)) {
+      $existing = [];
+    }
+
+    $normalized = [];
+    foreach ($existing as $candidate) {
+      if (!is_scalar($candidate)) {
+        continue;
+      }
+
+      $candidate = trim((string) $candidate);
+      if ($candidate !== '') {
+        $normalized[$candidate] = TRUE;
+      }
+    }
+
+    $normalized[$processUri] = TRUE;
+    $state->set('ctt.study_processes.' . $studyHash, array_keys($normalized));
+  }
+
   protected static function isUri(string $value): bool {
     $v = trim($value);
     return $v !== '' && (str_starts_with($v, 'http://') || str_starts_with($v, 'https://'));
@@ -410,7 +455,7 @@ class CttExecutionController extends ControllerBase {
     }
 
     // Persist chosen association for future inference.
-    \Drupal::state()->set('ctt.study_process.' . sha1($decodedStudyUri), $processUri);
+    $this->persistStudyProcessAssociation($decodedStudyUri, $processUri);
 
     return $this->redirect('ctt.editor', [], [
       'query' => [
