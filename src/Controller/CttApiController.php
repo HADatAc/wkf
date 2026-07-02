@@ -129,6 +129,41 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Normalize legacy element types in /{elementType}/keywordtype/... proxy paths.
+   *
+   * Some HASCOAPI deployments reject *instance elementType values in this
+   * endpoint family (e.g. platforminstance), while canonical singular types
+   * work consistently.
+   */
+  protected function normalizeLegacyKeywordTypeProxyPath(string $path): string {
+    $normalized = ltrim(trim($path), '/');
+    if ($normalized === '') {
+      return $normalized;
+    }
+
+    if (!preg_match('#^([^/]+)/keywordtype/(.+)$#i', $normalized, $matches)) {
+      return $normalized;
+    }
+
+    $element_type = strtolower(trim((string) ($matches[1] ?? '')));
+    $suffix = (string) ($matches[2] ?? '');
+
+    $map = [
+      'workflow' => 'process',
+      'workflowstem' => 'processstem',
+      'instrumentinstance' => 'instrument',
+      'componentinstance' => 'component',
+      'platforminstance' => 'platform',
+    ];
+
+    if (!isset($map[$element_type])) {
+      return $normalized;
+    }
+
+    return $map[$element_type] . '/keywordtype/' . $suffix;
+  }
+
+  /**
    * Extract study code token (e.g. STD123...) from study URI.
    */
   protected function extractStudyCodeFromUri(string $studyUri): string {
@@ -4081,6 +4116,7 @@ class CttApiController extends ControllerBase {
     }
 
     $path = $use_query_path ? $proxy_path : rawurldecode($proxy_path);
+    $path = $this->normalizeLegacyKeywordTypeProxyPath($path);
     $endpoint = '/hascoapi/api/' . ltrim($path, '/');
     $options = [];
 

@@ -1523,6 +1523,43 @@ class CttHascoClient {
   }
 
   /**
+   * Merge instrument lists by URI while preserving input order preference.
+   */
+  protected function mergeInstrumentListsByUri(array $preferred, array $secondary, int $limit = 0): array {
+    $merged = [];
+    $seen = [];
+
+    foreach ([$preferred, $secondary] as $list) {
+      foreach ($list as $item) {
+        if (is_object($item)) {
+          $item = (array) $item;
+        }
+        if (!is_array($item)) {
+          continue;
+        }
+
+        $uri = trim((string) ($item['uri'] ?? $item['hasURI'] ?? ''));
+        $key = $uri !== ''
+          ? strtolower(rtrim($uri, '/'))
+          : 'item:' . sha1(serialize($item));
+
+        if (isset($seen[$key])) {
+          continue;
+        }
+
+        $seen[$key] = TRUE;
+        $merged[] = $item;
+
+        if ($limit > 0 && count($merged) >= $limit) {
+          return $merged;
+        }
+      }
+    }
+
+    return $merged;
+  }
+
+  /**
    * Fallback instrument listing through REP connector endpoints.
    */
   protected function listInstrumentsViaRepConnector(int $page_size, int $offset): array {
@@ -1533,23 +1570,44 @@ class CttHascoClient {
     try {
       $api = \Drupal::service('rep.api_connector');
 
-      $list = [];
+      $manager_list = [];
+      $keyword_list = [];
       $manager_email = $this->getCurrentUserEmail();
       if ($manager_email !== '') {
-        $raw = $api->listByManagerEmail('instrument', $manager_email, $page_size, $offset);
-        $parsed = $api->parseObjectResponse($raw, 'listByManagerEmail');
-        $list = $this->normalizeInstrumentListPayload($parsed);
-      }
-
-      if (!empty($list)) {
-        return $list;
+        try {
+          $raw = $api->listByManagerEmail('instrument', $manager_email, $page_size, $offset);
+          $parsed = $api->parseObjectResponse($raw, 'listByManagerEmail');
+          $manager_list = $this->normalizeInstrumentListPayload($parsed);
+        }
+        catch (\Throwable $e) {
+          $this->logger->warning('Instrument managerEmail listing failed via REP: @message', [
+            '@message' => $e->getMessage(),
+          ]);
+        }
       }
 
       // Compatibility fallback: list by keyword for branches where managerEmail
       // filtering or user ownership metadata is inconsistent.
-      $raw = $api->listByKeyword('instrument', '_', $page_size, $offset);
-      $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
-      return $this->normalizeInstrumentListPayload($parsed);
+      try {
+        $raw = $api->listByKeyword('instrument', '_', $page_size, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $keyword_list = $this->normalizeInstrumentListPayload($parsed);
+      }
+      catch (\Throwable $e) {
+        $this->logger->warning('Instrument keyword listing failed via REP: @message', [
+          '@message' => $e->getMessage(),
+        ]);
+      }
+
+      if (!empty($keyword_list) && !empty($manager_list)) {
+        return $this->mergeInstrumentListsByUri($keyword_list, $manager_list, $page_size);
+      }
+
+      if (!empty($keyword_list)) {
+        return $keyword_list;
+      }
+
+      return $manager_list;
     }
     catch (\Throwable $e) {
       $this->logger->warning('Instrument fallback via REP failed: @message', [
@@ -1565,13 +1623,11 @@ class CttHascoClient {
   public function listInstruments(int $page_size = 50, int $offset = 0): array {
     $endpoint = '/hascoapi/api/instrument/elements/' . $page_size . '/' . $offset;
     $primary_error = '';
+    $primary_list = [];
 
     try {
       $response = $this->request('GET', $endpoint);
-      $normalized = $this->normalizeInstrumentListPayload($response);
-      if (!empty($normalized)) {
-        return $normalized;
-      }
+      $primary_list = $this->normalizeInstrumentListPayload($response);
 
       if (is_array($response) && (($response['isSuccessful'] ?? NULL) === FALSE)) {
         $primary_error = trim((string) ($response['body'] ?? ''));
@@ -1583,15 +1639,36 @@ class CttHascoClient {
 
     $fallback = $this->listInstrumentsViaRepConnector($page_size, $offset);
     if (!empty($fallback)) {
+      $merged = $this->mergeInstrumentListsByUri($fallback, $primary_list, $page_size);
+
+      if (empty($primary_list) || count($merged) > count($primary_list)) {
+        if ($primary_error !== '') {
+          $this->logger->warning('Instrument list fallback activated after HASCOAPI failure: @message', [
+            '@message' => $primary_error,
+          ]);
+        }
+        elseif (!empty($primary_list)) {
+          $this->logger->notice('Instrument list using REP superset (hascoapi=@hasco_count, rep=@rep_count).', [
+            '@hasco_count' => count($primary_list),
+            '@rep_count' => count($merged),
+          ]);
+        }
+
+        return $merged;
+      }
+
       if ($primary_error !== '') {
         $this->logger->warning('Instrument list fallback activated after HASCOAPI failure: @message', [
           '@message' => $primary_error,
         ]);
       }
-      return $fallback;
     }
 
-    return [];
+    if (!empty($primary_list)) {
+      return $primary_list;
+    }
+
+    return $fallback;
   }
 
   /**
