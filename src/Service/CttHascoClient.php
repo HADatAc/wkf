@@ -570,7 +570,7 @@ class CttHascoClient {
    * Normalize requiredInstrument input to a safe, minimal storage shape.
    *
    * Shape:
-   *   [{ instrumentUri: string, requiredComponents: [{ componentUri: string }] }]
+   *   [{ instrumentUri: string, requiredComponents: [{ componentUri: string, containerSlotUri?: string }] }]
    */
   protected function normalizeRequiredInstrumentForStorage(array $required_instrument): array {
     $normalized = [];
@@ -585,7 +585,7 @@ class CttHascoClient {
         continue;
       }
 
-      $component_uris = [];
+      $component_map = [];
       $required_components = $entry['requiredComponents'] ?? $entry['requiredComponent'] ?? [];
 
       if (is_string($required_components)) {
@@ -595,8 +595,10 @@ class CttHascoClient {
       if (is_array($required_components)) {
         foreach ($required_components as $rc) {
           $component_uri = '';
+          $container_slot_uri = '';
           if (is_array($rc)) {
             $component_uri = (string) ($rc['componentUri'] ?? $rc['usesComponent'] ?? $rc['hasComponent'] ?? ($rc['component']['uri'] ?? '') ?? ($rc['uri'] ?? ''));
+            $container_slot_uri = (string) ($rc['containerSlotUri'] ?? $rc['slotUri'] ?? $rc['hasContainerSlot'] ?? ($rc['containerSlot']['uri'] ?? '') ?? '');
           }
           elseif (is_string($rc)) {
             $component_uri = $rc;
@@ -604,21 +606,58 @@ class CttHascoClient {
 
           $component_uri = trim($component_uri);
           if ($component_uri !== '') {
-            $component_uris[] = $component_uri;
+            $payload = ['componentUri' => $component_uri];
+            $container_slot_uri = trim($container_slot_uri);
+            if ($container_slot_uri !== '') {
+              $payload['containerSlotUri'] = $container_slot_uri;
+            }
+
+            // Keep first occurrence to preserve user ordering and avoid duplicates.
+            if (!isset($component_map[$component_uri])) {
+              $component_map[$component_uri] = $payload;
+            }
           }
         }
       }
 
-      $component_uris = array_values(array_unique($component_uris));
       $normalized[] = [
         'instrumentUri' => $instrument_uri,
-        'requiredComponents' => array_map(function ($uri) {
-          return ['componentUri' => $uri];
-        }, $component_uris),
+        'requiredComponents' => array_values($component_map),
       ];
     }
 
     return $normalized;
+  }
+
+  /**
+   * Build API payload entries for task required instruments.
+   */
+  protected function buildTaskRequiredInstrumentApiEntries(array $required_instrument, bool $include_components = FALSE): array {
+    $normalized = $this->normalizeRequiredInstrumentForStorage($required_instrument);
+    $entries = [];
+
+    foreach ($normalized as $entry) {
+      if (!is_array($entry)) {
+        continue;
+      }
+
+      $instrument_uri = trim((string) ($entry['instrumentUri'] ?? ''));
+      if ($instrument_uri === '') {
+        continue;
+      }
+
+      $payload_entry = ['instrumentUri' => $instrument_uri];
+      if ($include_components) {
+        $required_components = $entry['requiredComponents'] ?? [];
+        if (is_array($required_components) && !empty($required_components)) {
+          $payload_entry['requiredComponents'] = $required_components;
+        }
+      }
+
+      $entries[] = $payload_entry;
+    }
+
+    return $entries;
   }
 
   /**
@@ -1162,6 +1201,73 @@ class CttHascoClient {
   }
 
   /**
+   * Determine if an API response indicates endpoint-level incompatibility.
+   */
+  protected function shouldFallbackToBodyEndpointFromResponse(array $response): bool {
+    if (($response['isSuccessful'] ?? NULL) !== FALSE) {
+      return FALSE;
+    }
+
+    $error_code = strtolower(trim((string) ($response['error']['code'] ?? $response['code'] ?? '')));
+    if (in_array($error_code, ['endpoint_not_found', 'not_found', 'method_not_allowed', 'unsupported_media_type'], TRUE)) {
+      return TRUE;
+    }
+
+    $message_parts = [
+      (string) ($response['error']['message'] ?? ''),
+      (string) ($response['body'] ?? ''),
+    ];
+    $message = strtolower(trim(implode(' ', array_filter($message_parts))));
+
+    if ($message === '') {
+      return FALSE;
+    }
+
+    return (strpos($message, 'endpoint') !== FALSE && strpos($message, 'not found') !== FALSE)
+      || strpos($message, 'method not allowed') !== FALSE
+      || strpos($message, 'unsupported media type') !== FALSE;
+  }
+
+  /**
+   * Determine if an exception suggests trying body-based create/delete endpoints.
+   */
+  protected function shouldFallbackToBodyEndpointFromException(\Throwable $e): bool {
+    $status = (int) $e->getCode();
+    if (in_array($status, [404, 405, 415], TRUE)) {
+      return TRUE;
+    }
+
+    $message = strtolower($e->getMessage());
+    return strpos($message, 'endpoint_not_found') !== FALSE
+      || (strpos($message, 'not found') !== FALSE && strpos($message, 'hascoapi') !== FALSE)
+      || strpos($message, 'method not allowed') !== FALSE
+      || strpos($message, 'unsupported media type') !== FALSE;
+  }
+
+  /**
+   * Fail fast when the API explicitly reports an unsuccessful operation.
+   */
+  protected function assertOperationSuccessful(array $response, string $operation): void {
+    if (($response['isSuccessful'] ?? NULL) !== FALSE) {
+      return;
+    }
+
+    $error_code = trim((string) ($response['error']['code'] ?? $response['code'] ?? ''));
+    $error_message = trim((string) ($response['error']['message'] ?? $response['body'] ?? ''));
+
+    $parts = [];
+    if ($error_code !== '') {
+      $parts[] = $error_code;
+    }
+    if ($error_message !== '') {
+      $parts[] = $error_message;
+    }
+
+    $suffix = !empty($parts) ? (': ' . implode(' - ', $parts)) : '';
+    throw new \RuntimeException($operation . ' reported isSuccessful=false' . $suffix);
+  }
+
+  /**
    * Create an element of the given type.
    */
   public function createElement(string $element_type, array $data): array {
@@ -1176,7 +1282,34 @@ class CttHascoClient {
 
     $json = json_encode($data);
     $endpoint = '/hascoapi/api/' . $element_type . '/create/' . rawurlencode($json);
-    return $this->request('POST', $endpoint);
+
+    try {
+      $response = $this->request('POST', $endpoint);
+      if (!$this->shouldFallbackToBodyEndpointFromResponse($response)) {
+        return $response;
+      }
+
+      $this->logger->warning('CTT create endpoint fallback activated for @type (path mode returned endpoint incompatibility).', [
+        '@type' => $element_type,
+      ]);
+    }
+    catch (\Throwable $e) {
+      if (!$this->shouldFallbackToBodyEndpointFromException($e)) {
+        throw $e;
+      }
+
+      $this->logger->warning('CTT create endpoint fallback activated for @type after path mode failure: @message', [
+        '@type' => $element_type,
+        '@message' => $e->getMessage(),
+      ]);
+    }
+
+    $body_endpoint = '/hascoapi/api/' . $element_type . '/create';
+    $response = $this->request('POST', $body_endpoint, [
+      'json' => $data,
+    ]);
+    $this->assertOperationSuccessful($response, 'Create ' . $element_type);
+    return $response;
   }
 
   /**
@@ -1184,7 +1317,37 @@ class CttHascoClient {
    */
   public function deleteElement(string $element_type, string $uri): array {
     $endpoint = '/hascoapi/api/' . $element_type . '/delete/' . rawurlencode($uri);
-    return $this->request('POST', $endpoint);
+
+    try {
+      $response = $this->request('POST', $endpoint);
+      if (!$this->shouldFallbackToBodyEndpointFromResponse($response)) {
+        return $response;
+      }
+
+      $this->logger->warning('CTT delete endpoint fallback activated for @type (path mode returned endpoint incompatibility).', [
+        '@type' => $element_type,
+      ]);
+    }
+    catch (\Throwable $e) {
+      if (!$this->shouldFallbackToBodyEndpointFromException($e)) {
+        throw $e;
+      }
+
+      $this->logger->warning('CTT delete endpoint fallback activated for @type after path mode failure: @message', [
+        '@type' => $element_type,
+        '@message' => $e->getMessage(),
+      ]);
+    }
+
+    $body_endpoint = '/hascoapi/api/' . $element_type . '/delete';
+    $response = $this->request('POST', $body_endpoint, [
+      'json' => [
+        'uri' => $uri,
+        'hasURI' => $uri,
+      ],
+    ]);
+    $this->assertOperationSuccessful($response, 'Delete ' . $element_type);
+    return $response;
   }
 
   // ================================================================
@@ -1424,47 +1587,65 @@ class CttHascoClient {
    * Returns the updated task body (unwrapped).
    */
   public function setTaskRequiredInstruments(string $task_uri, array $required_instrument): array {
-    // IMPORTANT: hascoapi's TaskAPI.setRequiredInstruments implementation is strict and
-    // currently rejects requiredComponents unless containerSlotUri is present and reads
-    // componentUri from the wrong JSON level.
-    //
-    // To keep Drupal+CTT working across hascoapi branches (and without backend changes),
-    // we:
-    //  1) Persist the full instrument+component selection locally (KV override), and
-    //  2) Send ONLY instrumentUri entries to hascoapi so the call succeeds.
-
     // Persist a local copy (full fidelity) to remain robust to API branch differences.
     $this->saveTaskInstrumentOverride($task_uri, $required_instrument);
 
-    // Strip components for hascoapi payload.
-    $api_required_instrument = [];
-    foreach ($required_instrument as $entry) {
+    // Build a legacy-safe payload (instrument only), and a full payload (includes components).
+    $api_required_instrument = $this->buildTaskRequiredInstrumentApiEntries($required_instrument, FALSE);
+    $api_required_instrument_full = $this->buildTaskRequiredInstrumentApiEntries($required_instrument, TRUE);
+
+    $has_components = FALSE;
+    foreach ($api_required_instrument_full as $entry) {
       if (!is_array($entry)) {
         continue;
       }
-      $instrument_uri = trim((string) ($entry['instrumentUri'] ?? ''));
-      if ($instrument_uri === '') {
-        continue;
+      $components = $entry['requiredComponents'] ?? [];
+      if (is_array($components) && !empty($components)) {
+        $has_components = TRUE;
+        break;
       }
-      $api_required_instrument[] = [
-        'instrumentUri' => $instrument_uri,
-      ];
     }
 
     // Avoid calling hascoapi with an empty list (it 400s). In this case we only update
     // the local override.
     if (!empty($api_required_instrument)) {
-      $payload = [
-        // Note: hascoapi Java controller expects lowercase 'taskuri'.
-        'taskuri' => $task_uri,
-        'requiredInstrument' => $api_required_instrument,
-      ];
-
+      // Note: hascoapi Java controller expects lowercase 'taskuri'.
       // This endpoint returns plain text on success (not JSON). We treat it as best-effort
       // and then fetch the task by URI to return a consistent JSON object to the frontend.
-      $this->request('POST', '/hascoapi/api/task/instruments', [
-        'json' => $payload,
-      ]);
+      if ($has_components) {
+        try {
+          $full_response = $this->request('POST', '/hascoapi/api/task/instruments', [
+            'json' => [
+              'taskuri' => $task_uri,
+              'requiredInstrument' => $api_required_instrument_full,
+            ],
+          ]);
+          $this->assertOperationSuccessful($full_response, 'Task instruments (full payload)');
+        }
+        catch (\Throwable $e) {
+          $this->logger->warning('Task instrument full payload rejected for @task. Retrying legacy payload: @error', [
+            '@task' => $task_uri,
+            '@error' => $e->getMessage(),
+          ]);
+
+          $legacy_response = $this->request('POST', '/hascoapi/api/task/instruments', [
+            'json' => [
+              'taskuri' => $task_uri,
+              'requiredInstrument' => $api_required_instrument,
+            ],
+          ]);
+          $this->assertOperationSuccessful($legacy_response, 'Task instruments (legacy payload)');
+        }
+      }
+      else {
+        $legacy_response = $this->request('POST', '/hascoapi/api/task/instruments', [
+          'json' => [
+            'taskuri' => $task_uri,
+            'requiredInstrument' => $api_required_instrument,
+          ],
+        ]);
+        $this->assertOperationSuccessful($legacy_response, 'Task instruments (legacy payload)');
+      }
     }
 
     return $this->getByUri($task_uri);

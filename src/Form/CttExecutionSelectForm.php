@@ -69,16 +69,33 @@ class CttExecutionSelectForm extends FormBase {
     $state = \Drupal::state();
     $storedProcessUri = $state->get('ctt.study_process.' . sha1($decodedStudyUri));
 
-    // Prefer processes associated to this study (Option 3).
-      // In this deployment, hascoapi does not support manageremailbystudy for process.
-      // So selection is from all workflows managed by the current user.
-      $processes = $api->parseObjectResponse(
+    // Prefer processes associated with this study when the API supports it.
+    // Keep manager-wide fallback for deployments where this endpoint is unavailable.
+    $processes = [];
+
+    try {
+      $studyScoped = $api->parseObjectResponse(
+        $api->listByManagerEmailByStudy($decodedStudyUri, 'workflow', $userEmail, 9999, 0),
+        'listByManagerEmail'
+      );
+
+      if (is_array($studyScoped) && !empty($studyScoped)) {
+        $processes = $studyScoped;
+      }
+    }
+    catch (\Throwable $e) {
+      // Fallback handled below.
+    }
+
+    if (empty($processes)) {
+      $fallback = $api->parseObjectResponse(
         $api->listByManagerEmail('workflow', $userEmail, 9999, 0),
         'listByManagerEmail'
       );
-      if ($processes === NULL) {
-        $processes = [];
+      if (is_array($fallback)) {
+        $processes = $fallback;
       }
+    }
 
     $options = [];
     if (is_array($processes)) {
