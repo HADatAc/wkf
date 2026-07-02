@@ -82,6 +82,26 @@
     return uriFromAutocompleteValue(value);
   };
 
+  const normalizeInputElementValueToUri = function (element) {
+    if (!element) {
+      return "";
+    }
+
+    const rawValue = String(element.value || "").trim();
+    if (rawValue === "") {
+      element.value = "";
+      return "";
+    }
+
+    const normalizedUri = normalizeUriInput(rawValue);
+    if (isHttpUri(normalizedUri)) {
+      element.value = normalizedUri;
+      return normalizedUri;
+    }
+
+    return "";
+  };
+
   const normalizeSuggestionValues = function (values) {
     if (!Array.isArray(values)) {
       return [];
@@ -1216,6 +1236,8 @@
       saveContext(state);
     });
     bind(state.studyUri, "change", function () {
+      normalizeInputElementValueToUri(state.studyUri);
+      normalizeInputElementValueToUri(state.processUri);
       rememberDisplayValueFromInput(state, state.studyUri ? state.studyUri.value : "");
       rememberDisplayValueFromInput(state, state.processUri ? state.processUri.value : "");
       autofillProcessFromStudy(state);
@@ -1228,6 +1250,7 @@
       saveContext(state);
     });
     bind(state.processUri, "change", function () {
+      normalizeInputElementValueToUri(state.processUri);
       rememberDisplayValueFromInput(state, state.studyUri ? state.studyUri.value : "");
       rememberDisplayValueFromInput(state, state.processUri ? state.processUri.value : "");
       rememberUriContext(
@@ -1245,6 +1268,16 @@
 
     bind(state.toolUri, "change", function () {
       state.preferredToolUri = String(state.toolUri && state.toolUri.value || "").trim();
+      saveContext(state);
+    });
+
+    bind(state.studyUri, "blur", function () {
+      normalizeInputElementValueToUri(state.studyUri);
+      saveContext(state);
+    });
+
+    bind(state.processUri, "blur", function () {
+      normalizeInputElementValueToUri(state.processUri);
       saveContext(state);
     });
   };
@@ -1334,6 +1367,11 @@
       return;
     }
 
+    if (state.isRunning === true) {
+      setFeedback(state, "warning", "A request is already running. Wait for completion before submitting again.");
+      return;
+    }
+
     const built = buildRequestPayload(state);
     if (!built.ok) {
       setFeedback(state, "warning", built.message || "Unable to prepare request payload.");
@@ -1347,6 +1385,7 @@
     saveContext(state);
 
     const originalRunButtonText = state.runButton ? state.runButton.textContent : "";
+    state.isRunning = true;
 
     if (state.runButton) {
       state.runButton.disabled = true;
@@ -1404,6 +1443,7 @@
       setFeedback(state, "error", "Failed to execute R analysis request.");
       updateDownloadLogButtonState(state);
     } finally {
+      state.isRunning = false;
       if (state.runButton) {
         state.runButton.disabled = false;
         state.runButton.textContent = originalRunButtonText;
@@ -1517,7 +1557,8 @@
           lastRequestPayload: null,
           lastExecutionPayload: null,
           lastExecutionHttpStatus: null,
-          bootstrapSuggestionsLoaded: false
+          bootstrapSuggestionsLoaded: false,
+          isRunning: false
         };
 
         ensureFeedbackUi(state);
