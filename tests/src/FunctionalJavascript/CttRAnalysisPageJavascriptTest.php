@@ -45,7 +45,11 @@ final class CttRAnalysisPageJavascriptTest extends WebDriverTestBase {
     $this->assertSession()->elementExists('css', '#ctt-r-analysis-page');
     $this->assertSession()->elementExists('css', '#ctt-r-analysis-form');
     $this->assertSession()->elementExists('css', '#ctt-r-study-uri');
+    $this->assertSession()->elementExists('css', '#ctt-r-study-uri-hint');
+    $this->assertSession()->elementExists('css', '#ctt-r-study-uri-error');
     $this->assertSession()->elementExists('css', '#ctt-r-process-uri');
+    $this->assertSession()->elementExists('css', '#ctt-r-process-uri-hint');
+    $this->assertSession()->elementExists('css', '#ctt-r-process-uri-error');
     $this->assertSession()->elementExists('css', '#ctt-r-tool-uri');
     $this->assertSession()->elementExists('css', '#ctt-r-entrypoint');
     $this->assertSession()->elementExists('css', '#ctt-r-validate-only');

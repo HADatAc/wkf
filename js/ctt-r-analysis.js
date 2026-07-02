@@ -102,6 +102,65 @@
     return "";
   };
 
+  const setFieldValidationState = function (field, errorElement, isValid, message) {
+    if (!field) {
+      return;
+    }
+
+    field.classList.remove("ctt-r-field-valid", "ctt-r-field-invalid");
+
+    if (typeof isValid !== "boolean") {
+      if (errorElement) {
+        errorElement.classList.add("d-none");
+        errorElement.textContent = "";
+      }
+      return;
+    }
+
+    field.classList.add(isValid ? "ctt-r-field-valid" : "ctt-r-field-invalid");
+    field.setAttribute("aria-invalid", isValid ? "false" : "true");
+
+    if (!errorElement) {
+      return;
+    }
+
+    if (isValid) {
+      errorElement.classList.add("d-none");
+      errorElement.textContent = "";
+      return;
+    }
+
+    errorElement.classList.remove("d-none");
+    errorElement.textContent = String(message || "Invalid URI value.");
+  };
+
+  const validateUriInputField = function (field, errorElement, fieldLabel) {
+    if (!field) {
+      return false;
+    }
+
+    const rawValue = String(field.value || "").trim();
+    if (rawValue === "") {
+      setFieldValidationState(field, errorElement, false, fieldLabel + " is required. Use autocomplete label [URI] or a full http(s) URI.");
+      return false;
+    }
+
+    const normalizedUri = normalizeUriInput(rawValue);
+    if (!isHttpUri(normalizedUri)) {
+      setFieldValidationState(field, errorElement, false, "Invalid " + fieldLabel.toLowerCase() + ". Use autocomplete label [URI] or a full http(s) URI.");
+      return false;
+    }
+
+    setFieldValidationState(field, errorElement, true, "");
+    return true;
+  };
+
+  const validateCoreUriFields = function (state) {
+    const studyOk = validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+    const processOk = validateUriInputField(state.processUri, state.processUriError, "Process URI");
+    return studyOk && processOk;
+  };
+
   const normalizeSuggestionValues = function (values) {
     if (!Array.isArray(values)) {
       return [];
@@ -1229,15 +1288,19 @@
 
     bind(state.studyUri, "input", function () {
       scheduleAutocompleteSuggestions(state, "study");
+      validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
       saveContext(state);
     });
     bind(state.processUri, "input", function () {
       scheduleAutocompleteSuggestions(state, "process");
+      validateUriInputField(state.processUri, state.processUriError, "Process URI");
       saveContext(state);
     });
     bind(state.studyUri, "change", function () {
       normalizeInputElementValueToUri(state.studyUri);
       normalizeInputElementValueToUri(state.processUri);
+      validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+      validateUriInputField(state.processUri, state.processUriError, "Process URI");
       rememberDisplayValueFromInput(state, state.studyUri ? state.studyUri.value : "");
       rememberDisplayValueFromInput(state, state.processUri ? state.processUri.value : "");
       autofillProcessFromStudy(state);
@@ -1251,6 +1314,7 @@
     });
     bind(state.processUri, "change", function () {
       normalizeInputElementValueToUri(state.processUri);
+      validateUriInputField(state.processUri, state.processUriError, "Process URI");
       rememberDisplayValueFromInput(state, state.studyUri ? state.studyUri.value : "");
       rememberDisplayValueFromInput(state, state.processUri ? state.processUri.value : "");
       rememberUriContext(
@@ -1273,16 +1337,23 @@
 
     bind(state.studyUri, "blur", function () {
       normalizeInputElementValueToUri(state.studyUri);
+      validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
       saveContext(state);
     });
 
     bind(state.processUri, "blur", function () {
       normalizeInputElementValueToUri(state.processUri);
+      validateUriInputField(state.processUri, state.processUriError, "Process URI");
       saveContext(state);
     });
   };
 
   const loadRealContext = async function (state) {
+    if (!validateCoreUriFields(state)) {
+      setFeedback(state, "warning", "Fix Study/Process fields before loading context.");
+      return;
+    }
+
     const studyUri = normalizeUriInput(state.studyUri && state.studyUri.value || "");
     if (!isHttpUri(studyUri)) {
       setFeedback(state, "warning", "Provide a valid Study selection (name [URI] or URI) before loading context.");
@@ -1364,6 +1435,11 @@
   const runAnalysis = async function (state) {
     if (!state.executeEndpoint) {
       setFeedback(state, "error", "Execution endpoint is not configured.");
+      return;
+    }
+
+    if (!validateCoreUriFields(state)) {
+      setFeedback(state, "warning", "Fix Study/Process fields before running validation or execution.");
       return;
     }
 
@@ -1525,6 +1601,8 @@
           form: root.querySelector("#ctt-r-analysis-form"),
           studyUri: root.querySelector("#ctt-r-study-uri"),
           processUri: root.querySelector("#ctt-r-process-uri"),
+          studyUriError: root.querySelector("#ctt-r-study-uri-error"),
+          processUriError: root.querySelector("#ctt-r-process-uri-error"),
           studyUriSuggestions: root.querySelector("#ctt-r-study-uri-suggestions"),
           processUriSuggestions: root.querySelector("#ctt-r-process-uri-suggestions"),
           toolUri: root.querySelector("#ctt-r-tool-uri"),
@@ -1584,6 +1662,8 @@
         );
         refreshUriSuggestions(state);
         bindPersistenceEvents(state);
+        validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+        validateUriInputField(state.processUri, state.processUriError, "Process URI");
         resetDiagnostics(state, "Run validation or execution to view diagnostics summary.");
         bootstrapUriSuggestionsFromBackend(state);
         scheduleAutocompleteSuggestions(state, "study");
