@@ -1385,7 +1385,7 @@ class CttHascoClient {
     // Prefer explicit tree traversal when subtasks are available.
     $visited = [];
     $tree_tasks = $this->collectTaskTree($top_task_uri, $visited);
-    $tree_tasks = $this->normalizeTaskCollectionForCanvas($tree_tasks);
+    $tree_tasks = $this->normalizeTaskCollectionForCanvas($tree_tasks, $top_task_uri);
 
     // Fallback for legacy ingested templates where only parent links are
     // available (for example hasParentTask) and root traversal returns 1 node.
@@ -1399,7 +1399,7 @@ class CttHascoClient {
     }
 
     $merged = $this->mergeTaskCollections($tree_tasks, $fallback_tasks);
-    return $this->normalizeTaskCollectionForCanvas($merged);
+    return $this->normalizeTaskCollectionForCanvas($merged, $top_task_uri);
   }
 
   /**
@@ -1668,7 +1668,7 @@ class CttHascoClient {
   /**
    * Normalize one task collection and rebuild parent/child aliases.
    */
-  protected function normalizeTaskCollectionForCanvas(array $tasks): array {
+  protected function normalizeTaskCollectionForCanvas(array $tasks, string $top_task_uri = ''): array {
     $task_map = [];
 
     foreach ($tasks as $task) {
@@ -1729,8 +1729,12 @@ class CttHascoClient {
         if (!isset($children_by_parent[$task_key])) {
           $children_by_parent[$task_key] = [];
         }
-        $children_by_parent[$task_key][$canonical_subtask_uri] = $canonical_subtask_uri;
+        $children_by_parent[$task_key][$this->normalizeUriForKey($canonical_subtask_uri)] = $canonical_subtask_uri;
       }
+    }
+
+    if (empty($children_by_parent)) {
+      $children_by_parent = $this->inferTaskHierarchyByUriPattern($task_map, $top_task_uri);
     }
 
     foreach ($children_by_parent as $parent_key => $child_uri_map) {
@@ -1738,7 +1742,7 @@ class CttHascoClient {
         continue;
       }
 
-      $child_uris = array_values($child_uri_map);
+      $child_uris = $this->sortTaskUrisByCode(array_values($child_uri_map));
       $task_map[$parent_key]['hasSubtaskUris'] = $child_uris;
       $task_map[$parent_key]['hasSubtask'] = $child_uris;
 
@@ -1762,6 +1766,174 @@ class CttHascoClient {
     }
 
     return array_values($task_map);
+  }
+
+  /**
+   * Extract task code suffix from URI (.../TSK/<code>).
+   */
+  protected function extractTaskCodeFromUri(string $task_uri): string {
+    $normalized = $this->normalizeUriForKey($task_uri);
+    if ($normalized === '') {
+      return '';
+    }
+
+    if (preg_match('~/TSK/([^/?#]+)$~i', $normalized, $matches) !== 1) {
+      return '';
+    }
+
+    return strtoupper(trim((string) ($matches[1] ?? '')));
+  }
+
+  /**
+   * Compare task URIs using extracted task code for deterministic ordering.
+   */
+  protected function compareTaskUrisByCode(string $left_uri, string $right_uri): int {
+    $left_code = $this->extractTaskCodeFromUri($left_uri);
+    $right_code = $this->extractTaskCodeFromUri($right_uri);
+
+    if ($left_code !== '' && $right_code !== '') {
+      $code_compare = strnatcasecmp($left_code, $right_code);
+      if ($code_compare !== 0) {
+        return $code_compare;
+      }
+    }
+
+    return strcmp($left_uri, $right_uri);
+  }
+
+  /**
+   * Sort task URI list with stable natural ordering by task code.
+   */
+  protected function sortTaskUrisByCode(array $task_uris): array {
+    $deduped = [];
+    foreach ($task_uris as $task_uri) {
+      $candidate = trim((string) $task_uri);
+      $candidate_key = $this->normalizeUriForKey($candidate);
+      if ($candidate_key !== '') {
+        $deduped[$candidate_key] = $candidate;
+      }
+    }
+
+    $sorted = array_values($deduped);
+    usort($sorted, function (string $left_uri, string $right_uri): int {
+      return $this->compareTaskUrisByCode($left_uri, $right_uri);
+    });
+
+    return $sorted;
+  }
+
+  /**
+   * Infer missing parent/child task hierarchy from URI code patterns.
+   */
+  protected function inferTaskHierarchyByUriPattern(array &$task_map, string $top_task_uri = ''): array {
+    if (count($task_map) < 2) {
+      return [];
+    }
+
+    $task_key_by_code = [];
+    foreach ($task_map as $task_key => $task) {
+      $task_uri = $this->extractTaskUri($task);
+      if ($task_uri === '') {
+        continue;
+      }
+
+      $task_code = $this->extractTaskCodeFromUri($task_uri);
+      if ($task_code !== '') {
+        $task_key_by_code[$task_code] = $task_key;
+      }
+    }
+
+    $top_task_key = '';
+    foreach ($this->taskUriVariants($top_task_uri) as $top_task_candidate_uri) {
+      $candidate_key = $this->normalizeUriForKey($top_task_candidate_uri);
+      if ($candidate_key !== '' && isset($task_map[$candidate_key])) {
+        $top_task_key = $candidate_key;
+        break;
+      }
+    }
+
+    if ($top_task_key === '' && isset($task_key_by_code['0001'])) {
+      $top_task_key = $task_key_by_code['0001'];
+    }
+
+    if ($top_task_key === '') {
+      $grouped_root_codes = [];
+      foreach ($task_key_by_code as $task_code => $task_key) {
+        if (preg_match('/^[0-9]{4}$/', $task_code) === 1) {
+          $grouped_root_codes[$task_code] = $task_key;
+        }
+      }
+
+      if (!empty($grouped_root_codes)) {
+        uksort($grouped_root_codes, 'strnatcasecmp');
+        $top_task_key = (string) reset($grouped_root_codes);
+      }
+    }
+
+    $children_by_parent = [];
+
+    foreach ($task_map as $task_key => $task) {
+      if ($top_task_key !== '' && $task_key === $top_task_key) {
+        continue;
+      }
+
+      $task_uri = $this->extractTaskUri($task);
+      if ($task_uri === '') {
+        continue;
+      }
+
+      $task_code = $this->extractTaskCodeFromUri($task_uri);
+      if ($task_code === '') {
+        continue;
+      }
+
+      $parent_key = '';
+
+      if (preg_match('/^([0-9]{1,4})([A-Z]+)$/', $task_code, $matches) === 1) {
+        $parent_code = str_pad((string) ($matches[1] ?? ''), 4, '0', STR_PAD_LEFT);
+        if (isset($task_key_by_code[$parent_code])) {
+          $parent_key = $task_key_by_code[$parent_code];
+        }
+      }
+
+      if ($parent_key === '' || $parent_key === $task_key || !isset($task_map[$parent_key])) {
+        continue;
+      }
+
+      $parent_uri = $this->extractTaskUri($task_map[$parent_key]);
+      if ($parent_uri === '') {
+        continue;
+      }
+
+      $current_parent_uri = $this->extractTaskParentUri($task_map[$task_key]);
+      if ($current_parent_uri === '') {
+        $task_map[$task_key]['hasSupertaskUri'] = $parent_uri;
+        $task_map[$task_key]['hasSupertask'] = $parent_uri;
+      }
+
+      if (!isset($children_by_parent[$parent_key])) {
+        $children_by_parent[$parent_key] = [];
+      }
+      $children_by_parent[$parent_key][$this->normalizeUriForKey($task_uri)] = $task_uri;
+    }
+
+    foreach ($children_by_parent as $parent_key => $child_uri_map) {
+      if (!isset($task_map[$parent_key])) {
+        continue;
+      }
+
+      $existing_subtasks = [];
+      foreach ($this->extractTaskSubtaskUris($task_map[$parent_key]) as $subtask_uri) {
+        $subtask_key = $this->normalizeUriForKey($subtask_uri);
+        if ($subtask_key !== '') {
+          $existing_subtasks[$subtask_key] = $subtask_uri;
+        }
+      }
+
+      $children_by_parent[$parent_key] = array_merge($existing_subtasks, $child_uri_map);
+    }
+
+    return $children_by_parent;
   }
 
   /**
@@ -1978,7 +2150,7 @@ class CttHascoClient {
       return [];
     }
 
-    $normalized = $this->normalizeTaskCollectionForCanvas(array_values($candidate_map));
+    $normalized = $this->normalizeTaskCollectionForCanvas(array_values($candidate_map), $top_task_uri);
     return $this->orderTasksByHierarchy($normalized, $top_task_uri);
   }
 
