@@ -186,3 +186,24 @@
 .ctt-r-analysis-page .ctt-r-break-all {
   word-break: break-all;
 }
+
+.ctt-r-analysis-page .ctt-r-inline-hint {
+  margin-top: 0.3rem;
+  font-size: 0.79rem;
+}
+
+.ctt-r-analysis-page .ctt-r-inline-error {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: #b91c1c;
+}
+
+.ctt-r-analysis-page .ctt-r-field-invalid {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 0.18rem rgba(220, 38, 38, 0.15);
+}
+
+.ctt-r-analysis-page .ctt-r-field-valid {
+  border-color: #16a34a;
+  box-shadow: 0 0 0 0.18rem rgba(22, 163, 74, 0.12);
+}

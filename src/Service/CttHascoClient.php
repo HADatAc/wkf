@@ -570,7 +570,7 @@ class CttHascoClient {
    * Normalize requiredInstrument input to a safe, minimal storage shape.
    *
    * Shape:
-   *   [{ instrumentUri: string, requiredComponents: [{ componentUri: string }] }]
+   *   [{ instrumentUri: string, requiredComponents: [{ componentUri: string, containerSlotUri?: string }] }]
    */
   protected function normalizeRequiredInstrumentForStorage(array $required_instrument): array {
     $normalized = [];
@@ -585,7 +585,7 @@ class CttHascoClient {
         continue;
       }
 
-      $component_uris = [];
+      $component_map = [];
       $required_components = $entry['requiredComponents'] ?? $entry['requiredComponent'] ?? [];
 
       if (is_string($required_components)) {
@@ -595,8 +595,10 @@ class CttHascoClient {
       if (is_array($required_components)) {
         foreach ($required_components as $rc) {
           $component_uri = '';
+          $container_slot_uri = '';
           if (is_array($rc)) {
             $component_uri = (string) ($rc['componentUri'] ?? $rc['usesComponent'] ?? $rc['hasComponent'] ?? ($rc['component']['uri'] ?? '') ?? ($rc['uri'] ?? ''));
+            $container_slot_uri = (string) ($rc['containerSlotUri'] ?? $rc['slotUri'] ?? $rc['hasContainerSlot'] ?? ($rc['containerSlot']['uri'] ?? '') ?? '');
           }
           elseif (is_string($rc)) {
             $component_uri = $rc;
@@ -604,21 +606,58 @@ class CttHascoClient {
 
           $component_uri = trim($component_uri);
           if ($component_uri !== '') {
-            $component_uris[] = $component_uri;
+            $payload = ['componentUri' => $component_uri];
+            $container_slot_uri = trim($container_slot_uri);
+            if ($container_slot_uri !== '') {
+              $payload['containerSlotUri'] = $container_slot_uri;
+            }
+
+            // Keep first occurrence to preserve user ordering and avoid duplicates.
+            if (!isset($component_map[$component_uri])) {
+              $component_map[$component_uri] = $payload;
+            }
           }
         }
       }
 
-      $component_uris = array_values(array_unique($component_uris));
       $normalized[] = [
         'instrumentUri' => $instrument_uri,
-        'requiredComponents' => array_map(function ($uri) {
-          return ['componentUri' => $uri];
-        }, $component_uris),
+        'requiredComponents' => array_values($component_map),
       ];
     }
 
     return $normalized;
+  }
+
+  /**
+   * Build API payload entries for task required instruments.
+   */
+  protected function buildTaskRequiredInstrumentApiEntries(array $required_instrument, bool $include_components = FALSE): array {
+    $normalized = $this->normalizeRequiredInstrumentForStorage($required_instrument);
+    $entries = [];
+
+    foreach ($normalized as $entry) {
+      if (!is_array($entry)) {
+        continue;
+      }
+
+      $instrument_uri = trim((string) ($entry['instrumentUri'] ?? ''));
+      if ($instrument_uri === '') {
+        continue;
+      }
+
+      $payload_entry = ['instrumentUri' => $instrument_uri];
+      if ($include_components) {
+        $required_components = $entry['requiredComponents'] ?? [];
+        if (is_array($required_components) && !empty($required_components)) {
+          $payload_entry['requiredComponents'] = $required_components;
+        }
+      }
+
+      $entries[] = $payload_entry;
+    }
+
+    return $entries;
   }
 
   /**
@@ -1162,6 +1201,73 @@ class CttHascoClient {
   }
 
   /**
+   * Determine if an API response indicates endpoint-level incompatibility.
+   */
+  protected function shouldFallbackToBodyEndpointFromResponse(array $response): bool {
+    if (($response['isSuccessful'] ?? NULL) !== FALSE) {
+      return FALSE;
+    }
+
+    $error_code = strtolower(trim((string) ($response['error']['code'] ?? $response['code'] ?? '')));
+    if (in_array($error_code, ['endpoint_not_found', 'not_found', 'method_not_allowed', 'unsupported_media_type'], TRUE)) {
+      return TRUE;
+    }
+
+    $message_parts = [
+      (string) ($response['error']['message'] ?? ''),
+      (string) ($response['body'] ?? ''),
+    ];
+    $message = strtolower(trim(implode(' ', array_filter($message_parts))));
+
+    if ($message === '') {
+      return FALSE;
+    }
+
+    return (strpos($message, 'endpoint') !== FALSE && strpos($message, 'not found') !== FALSE)
+      || strpos($message, 'method not allowed') !== FALSE
+      || strpos($message, 'unsupported media type') !== FALSE;
+  }
+
+  /**
+   * Determine if an exception suggests trying body-based create/delete endpoints.
+   */
+  protected function shouldFallbackToBodyEndpointFromException(\Throwable $e): bool {
+    $status = (int) $e->getCode();
+    if (in_array($status, [404, 405, 415], TRUE)) {
+      return TRUE;
+    }
+
+    $message = strtolower($e->getMessage());
+    return strpos($message, 'endpoint_not_found') !== FALSE
+      || (strpos($message, 'not found') !== FALSE && strpos($message, 'hascoapi') !== FALSE)
+      || strpos($message, 'method not allowed') !== FALSE
+      || strpos($message, 'unsupported media type') !== FALSE;
+  }
+
+  /**
+   * Fail fast when the API explicitly reports an unsuccessful operation.
+   */
+  protected function assertOperationSuccessful(array $response, string $operation): void {
+    if (($response['isSuccessful'] ?? NULL) !== FALSE) {
+      return;
+    }
+
+    $error_code = trim((string) ($response['error']['code'] ?? $response['code'] ?? ''));
+    $error_message = trim((string) ($response['error']['message'] ?? $response['body'] ?? ''));
+
+    $parts = [];
+    if ($error_code !== '') {
+      $parts[] = $error_code;
+    }
+    if ($error_message !== '') {
+      $parts[] = $error_message;
+    }
+
+    $suffix = !empty($parts) ? (': ' . implode(' - ', $parts)) : '';
+    throw new \RuntimeException($operation . ' reported isSuccessful=false' . $suffix);
+  }
+
+  /**
    * Create an element of the given type.
    */
   public function createElement(string $element_type, array $data): array {
@@ -1176,7 +1282,34 @@ class CttHascoClient {
 
     $json = json_encode($data);
     $endpoint = '/hascoapi/api/' . $element_type . '/create/' . rawurlencode($json);
-    return $this->request('POST', $endpoint);
+
+    try {
+      $response = $this->request('POST', $endpoint);
+      if (!$this->shouldFallbackToBodyEndpointFromResponse($response)) {
+        return $response;
+      }
+
+      $this->logger->warning('CTT create endpoint fallback activated for @type (path mode returned endpoint incompatibility).', [
+        '@type' => $element_type,
+      ]);
+    }
+    catch (\Throwable $e) {
+      if (!$this->shouldFallbackToBodyEndpointFromException($e)) {
+        throw $e;
+      }
+
+      $this->logger->warning('CTT create endpoint fallback activated for @type after path mode failure: @message', [
+        '@type' => $element_type,
+        '@message' => $e->getMessage(),
+      ]);
+    }
+
+    $body_endpoint = '/hascoapi/api/' . $element_type . '/create';
+    $response = $this->request('POST', $body_endpoint, [
+      'json' => $data,
+    ]);
+    $this->assertOperationSuccessful($response, 'Create ' . $element_type);
+    return $response;
   }
 
   /**
@@ -1184,7 +1317,37 @@ class CttHascoClient {
    */
   public function deleteElement(string $element_type, string $uri): array {
     $endpoint = '/hascoapi/api/' . $element_type . '/delete/' . rawurlencode($uri);
-    return $this->request('POST', $endpoint);
+
+    try {
+      $response = $this->request('POST', $endpoint);
+      if (!$this->shouldFallbackToBodyEndpointFromResponse($response)) {
+        return $response;
+      }
+
+      $this->logger->warning('CTT delete endpoint fallback activated for @type (path mode returned endpoint incompatibility).', [
+        '@type' => $element_type,
+      ]);
+    }
+    catch (\Throwable $e) {
+      if (!$this->shouldFallbackToBodyEndpointFromException($e)) {
+        throw $e;
+      }
+
+      $this->logger->warning('CTT delete endpoint fallback activated for @type after path mode failure: @message', [
+        '@type' => $element_type,
+        '@message' => $e->getMessage(),
+      ]);
+    }
+
+    $body_endpoint = '/hascoapi/api/' . $element_type . '/delete';
+    $response = $this->request('POST', $body_endpoint, [
+      'json' => [
+        'uri' => $uri,
+        'hasURI' => $uri,
+      ],
+    ]);
+    $this->assertOperationSuccessful($response, 'Delete ' . $element_type);
+    return $response;
   }
 
   // ================================================================
@@ -1219,9 +1382,49 @@ class CttHascoClient {
       return [];
     }
 
-    // Recursively collect tasks starting from the top task.
+    // Prefer explicit tree traversal when subtasks are available.
     $visited = [];
-    return $this->collectTaskTree($top_task_uri, $visited);
+    $tree_tasks = $this->collectTaskTree($top_task_uri, $visited);
+    $tree_tasks = $this->normalizeTaskCollectionForCanvas($tree_tasks, $top_task_uri);
+
+    // Fallback for legacy ingested templates where relation links are partial.
+    // Trigger it when traversal only returns the root or just first-hop children.
+    $should_fallback = (count($tree_tasks) <= 1);
+    if (!$should_fallback && !empty($tree_tasks)) {
+      $top_key = $this->normalizeUriForKey($top_task_uri);
+      $top_task = NULL;
+
+      foreach ($tree_tasks as $candidate_task) {
+        if (!is_array($candidate_task)) {
+          continue;
+        }
+
+        $candidate_uri = $this->extractTaskUri($candidate_task);
+        if ($this->normalizeUriForKey($candidate_uri) === $top_key) {
+          $top_task = $candidate_task;
+          break;
+        }
+      }
+
+      if (is_array($top_task)) {
+        $direct_subtask_count = count($this->extractTaskSubtaskUris($top_task));
+        if ($direct_subtask_count > 0 && count($tree_tasks) <= (1 + $direct_subtask_count)) {
+          $should_fallback = TRUE;
+        }
+      }
+    }
+
+    if (!$should_fallback) {
+      return $tree_tasks;
+    }
+
+    $fallback_tasks = $this->collectTasksByProcessFallback($process_uri, $top_task_uri);
+    if (empty($fallback_tasks)) {
+      return $tree_tasks;
+    }
+
+    $merged = $this->mergeTaskCollections($tree_tasks, $fallback_tasks);
+    return $this->normalizeTaskCollectionForCanvas($merged, $top_task_uri);
   }
 
   /**
@@ -1239,6 +1442,8 @@ class CttHascoClient {
       return [];
     }
 
+    $task = $this->normalizeTaskShapeForCanvas($task);
+
     $resolved_task_uri = trim((string) ($task['uri'] ?? $task['hasURI'] ?? $task_uri));
     $resolved_key = $this->normalizeUriForKey($resolved_task_uri);
     if ($resolved_key !== '') {
@@ -1247,36 +1452,731 @@ class CttHascoClient {
 
     $tasks = [$task];
 
-    // Get subtask URIs.
-    $subtask_refs = $task['hasSubtaskUris'] ?? $task['hasSubtask'] ?? $task['hasSubtasks'] ?? [];
-    if (is_string($subtask_refs)) {
-      $subtask_refs = [$subtask_refs];
-    }
-    if (!is_array($subtask_refs)) {
-      return $tasks;
-    }
-
-    foreach ($subtask_refs as $subtask_ref) {
-      $subtask_uri = '';
-      if (is_string($subtask_ref)) {
-        $subtask_uri = trim($subtask_ref);
-      }
-      elseif (is_array($subtask_ref)) {
-        $subtask_uri = trim((string) ($subtask_ref['uri'] ?? $subtask_ref['hasURI'] ?? $subtask_ref['taskUri'] ?? ''));
-      }
-      elseif (is_object($subtask_ref)) {
-        $subtask_uri = trim((string) ($subtask_ref->uri ?? $subtask_ref->hasURI ?? $subtask_ref->taskUri ?? ''));
-      }
-
-      if ($subtask_uri === '') {
-        continue;
-      }
-
+    foreach ($this->extractTaskSubtaskUris($task) as $subtask_uri) {
       $subtasks = $this->collectTaskTree($subtask_uri, $visited);
       $tasks = array_merge($tasks, $subtasks);
     }
 
     return $tasks;
+  }
+
+  /**
+   * Extract canonical task URI from mixed payload shapes.
+   */
+  protected function extractTaskUri($value): string {
+    if (is_string($value)) {
+      $candidate = trim($value);
+      return $this->looksLikeUriValue($candidate) ? $candidate : '';
+    }
+
+    if (is_array($value)) {
+      $candidate = trim((string) ($value['uri'] ?? $value['hasURI'] ?? $value['taskUri'] ?? $value['hasTaskUri'] ?? ''));
+      return $this->looksLikeUriValue($candidate) ? $candidate : '';
+    }
+
+    if (is_object($value)) {
+      $candidate = trim((string) ($value->uri ?? $value->hasURI ?? $value->taskUri ?? $value->hasTaskUri ?? ''));
+      return $this->looksLikeUriValue($candidate) ? $candidate : '';
+    }
+
+    return '';
+  }
+
+  /**
+   * Best-effort URI shape guard for mixed API payloads.
+   */
+  protected function looksLikeUriValue(string $value): bool {
+    $candidate = trim($value);
+    if ($candidate === '') {
+      return FALSE;
+    }
+
+    if (preg_match('/\s/', $candidate)) {
+      return FALSE;
+    }
+
+    if (strpos($candidate, '://') !== FALSE) {
+      return TRUE;
+    }
+
+    if (stripos($candidate, 'pmsr:/') === 0 || stripos($candidate, 'urn:') === 0) {
+      return TRUE;
+    }
+
+    return strpos($candidate, '/TSK/') !== FALSE
+      || strpos($candidate, '/PROC/') !== FALSE
+      || strpos($candidate, '/PC0') !== FALSE;
+  }
+
+  /**
+   * Parse delimited URI strings used by some hascoapi payload variants.
+   */
+  protected function parseDelimitedUris(string $value): array {
+    $raw = trim($value);
+    if ($raw === '') {
+      return [];
+    }
+
+    $chunks = preg_split('/[;,|]+/', $raw);
+    if (!is_array($chunks)) {
+      $chunks = [$raw];
+    }
+
+    $values = [];
+    foreach ($chunks as $chunk) {
+      $candidate = trim((string) $chunk);
+      if ($candidate !== '' && $this->looksLikeUriValue($candidate)) {
+        $values[$this->normalizeUriForKey($candidate)] = $candidate;
+      }
+    }
+
+    return array_values(array_filter($values, function ($value) {
+      return trim((string) $value) !== '';
+    }));
+  }
+
+  /**
+   * Extract task URIs from strings/arrays/objects.
+   */
+  protected function extractTaskUrisFromValue($value): array {
+    $uris = [];
+
+    if (is_string($value)) {
+      foreach ($this->parseDelimitedUris($value) as $candidate) {
+        $key = $this->normalizeUriForKey($candidate);
+        if ($key !== '') {
+          $uris[$key] = $candidate;
+        }
+      }
+      return array_values($uris);
+    }
+
+    if (is_object($value)) {
+      $value = (array) $value;
+    }
+
+    if (!is_array($value)) {
+      return [];
+    }
+
+    $direct = $this->extractTaskUri($value);
+    if ($direct !== '') {
+      $uris[$this->normalizeUriForKey($direct)] = $direct;
+    }
+
+    foreach ($value as $item) {
+      foreach ($this->extractTaskUrisFromValue($item) as $candidate) {
+        $key = $this->normalizeUriForKey($candidate);
+        if ($key !== '') {
+          $uris[$key] = $candidate;
+        }
+      }
+    }
+
+    return array_values($uris);
+  }
+
+  /**
+   * Extract child task URIs from mixed subtask payload fields.
+   */
+  protected function extractTaskSubtaskUris(array $task): array {
+    $uris = [];
+    $raw_candidates = [
+      $task['hasSubtaskUris'] ?? NULL,
+      $task['hasSubtask'] ?? NULL,
+      $task['hasSubtasks'] ?? NULL,
+      $task['subtaskUris'] ?? NULL,
+      $task['hasSubtaskUri'] ?? NULL,
+    ];
+
+    foreach ($raw_candidates as $raw_candidate) {
+      foreach ($this->extractTaskUrisFromValue($raw_candidate) as $candidate_uri) {
+        $key = $this->normalizeUriForKey($candidate_uri);
+        if ($key !== '') {
+          $uris[$key] = $candidate_uri;
+        }
+      }
+    }
+
+    return array_values($uris);
+  }
+
+  /**
+   * Extract parent task URI from legacy and current payload variants.
+   */
+  protected function extractTaskParentUri(array $task): string {
+    $raw_candidates = [
+      $task['hasSupertaskUri'] ?? NULL,
+      $task['supertaskUri'] ?? NULL,
+      $task['hasSupertask'] ?? NULL,
+      $task['hasParentTaskUri'] ?? NULL,
+      $task['parentTaskUri'] ?? NULL,
+      $task['hasParentTask'] ?? NULL,
+      $task['parentTask'] ?? NULL,
+    ];
+
+    foreach ($raw_candidates as $raw_candidate) {
+      $uris = $this->extractTaskUrisFromValue($raw_candidate);
+      if (!empty($uris)) {
+        return trim((string) reset($uris));
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Extract process URI from known task payload fields.
+   */
+  protected function extractTaskProcessUri(array $task): string {
+    $raw_candidates = [
+      $task['processUri'] ?? NULL,
+      $task['workflowUri'] ?? NULL,
+      $task['workflowuri'] ?? NULL,
+      $task['hasWorkflowUri'] ?? NULL,
+      $task['hasProcessUri'] ?? NULL,
+      $task['partOfProcessUri'] ?? NULL,
+      $task['partOfProcess'] ?? NULL,
+      $task['partOf'] ?? NULL,
+      $task['hasSIRPartOf'] ?? NULL,
+      $task['hasProcess'] ?? NULL,
+      $task['process'] ?? NULL,
+    ];
+
+    foreach ($raw_candidates as $raw_candidate) {
+      if (is_string($raw_candidate)) {
+        $candidate = trim($raw_candidate);
+        if ($candidate !== '' && $this->looksLikeUriValue($candidate)) {
+          return $candidate;
+        }
+        continue;
+      }
+
+      $candidate = $this->extractTaskUri($raw_candidate);
+      if ($candidate !== '') {
+        return $candidate;
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Canonicalize task relation fields expected by the editor frontend.
+   */
+  protected function normalizeTaskShapeForCanvas(array $task): array {
+    $task_uri = $this->extractTaskUri($task);
+    if ($task_uri !== '') {
+      if (empty($task['uri'])) {
+        $task['uri'] = $task_uri;
+      }
+      if (empty($task['hasURI'])) {
+        $task['hasURI'] = $task_uri;
+      }
+    }
+
+    $subtask_uris = $this->extractTaskSubtaskUris($task);
+    if (!empty($subtask_uris)) {
+      $task['hasSubtaskUris'] = $subtask_uris;
+      $task['hasSubtask'] = $subtask_uris;
+    }
+
+    $parent_uri = $this->extractTaskParentUri($task);
+    if ($parent_uri !== '') {
+      $task['hasSupertaskUri'] = $parent_uri;
+      $task['hasSupertask'] = $parent_uri;
+    }
+
+    return $task;
+  }
+
+  /**
+   * Normalize one task collection and rebuild parent/child aliases.
+   */
+  protected function normalizeTaskCollectionForCanvas(array $tasks, string $top_task_uri = ''): array {
+    $task_map = [];
+
+    foreach ($tasks as $task) {
+      if (is_object($task)) {
+        $task = (array) $task;
+      }
+      if (!is_array($task)) {
+        continue;
+      }
+
+      $task = $this->normalizeTaskShapeForCanvas($task);
+      $task_uri = $this->extractTaskUri($task);
+      $task_key = $this->normalizeUriForKey($task_uri);
+      if ($task_key === '') {
+        continue;
+      }
+
+      $task_map[$task_key] = $task;
+    }
+
+    if (empty($task_map)) {
+      return [];
+    }
+
+    $children_by_parent = [];
+
+    foreach ($task_map as $task_key => $task) {
+      $task_uri = $this->extractTaskUri($task);
+      if ($task_uri === '') {
+        continue;
+      }
+
+      $parent_uri = $this->extractTaskParentUri($task);
+      $parent_key = $this->normalizeUriForKey($parent_uri);
+      if ($parent_key !== '' && isset($task_map[$parent_key])) {
+        $canonical_parent_uri = $this->extractTaskUri($task_map[$parent_key]);
+        if ($canonical_parent_uri !== '') {
+          $task_map[$task_key]['hasSupertaskUri'] = $canonical_parent_uri;
+          $task_map[$task_key]['hasSupertask'] = $canonical_parent_uri;
+          if (!isset($children_by_parent[$parent_key])) {
+            $children_by_parent[$parent_key] = [];
+          }
+          $children_by_parent[$parent_key][$task_uri] = $task_uri;
+        }
+      }
+
+      foreach ($this->extractTaskSubtaskUris($task) as $subtask_uri) {
+        $subtask_key = $this->normalizeUriForKey($subtask_uri);
+        if ($subtask_key === '' || !isset($task_map[$subtask_key])) {
+          continue;
+        }
+
+        $canonical_subtask_uri = $this->extractTaskUri($task_map[$subtask_key]);
+        if ($canonical_subtask_uri === '') {
+          continue;
+        }
+
+        if (!isset($children_by_parent[$task_key])) {
+          $children_by_parent[$task_key] = [];
+        }
+        $children_by_parent[$task_key][$this->normalizeUriForKey($canonical_subtask_uri)] = $canonical_subtask_uri;
+      }
+    }
+
+    if (empty($children_by_parent)) {
+      $children_by_parent = $this->inferTaskHierarchyByUriPattern($task_map, $top_task_uri);
+    }
+
+    foreach ($children_by_parent as $parent_key => $child_uri_map) {
+      if (!isset($task_map[$parent_key])) {
+        continue;
+      }
+
+      $child_uris = $this->sortTaskUrisByCode(array_values($child_uri_map));
+      $task_map[$parent_key]['hasSubtaskUris'] = $child_uris;
+      $task_map[$parent_key]['hasSubtask'] = $child_uris;
+
+      $parent_uri = $this->extractTaskUri($task_map[$parent_key]);
+      if ($parent_uri === '') {
+        continue;
+      }
+
+      foreach ($child_uris as $child_uri) {
+        $child_key = $this->normalizeUriForKey($child_uri);
+        if ($child_key === '' || !isset($task_map[$child_key])) {
+          continue;
+        }
+
+        $child_parent_uri = $this->extractTaskParentUri($task_map[$child_key]);
+        if ($child_parent_uri === '') {
+          $task_map[$child_key]['hasSupertaskUri'] = $parent_uri;
+          $task_map[$child_key]['hasSupertask'] = $parent_uri;
+        }
+      }
+    }
+
+    return array_values($task_map);
+  }
+
+  /**
+   * Extract task code suffix from URI (.../TSK/<code>).
+   */
+  protected function extractTaskCodeFromUri(string $task_uri): string {
+    $normalized = $this->normalizeUriForKey($task_uri);
+    if ($normalized === '') {
+      return '';
+    }
+
+    if (preg_match('~/TSK/([^/?#]+)$~i', $normalized, $matches) !== 1) {
+      return '';
+    }
+
+    return strtoupper(trim((string) ($matches[1] ?? '')));
+  }
+
+  /**
+   * Compare task URIs using extracted task code for deterministic ordering.
+   */
+  protected function compareTaskUrisByCode(string $left_uri, string $right_uri): int {
+    $left_code = $this->extractTaskCodeFromUri($left_uri);
+    $right_code = $this->extractTaskCodeFromUri($right_uri);
+
+    if ($left_code !== '' && $right_code !== '') {
+      $code_compare = strnatcasecmp($left_code, $right_code);
+      if ($code_compare !== 0) {
+        return $code_compare;
+      }
+    }
+
+    return strcmp($left_uri, $right_uri);
+  }
+
+  /**
+   * Sort task URI list with stable natural ordering by task code.
+   */
+  protected function sortTaskUrisByCode(array $task_uris): array {
+    $deduped = [];
+    foreach ($task_uris as $task_uri) {
+      $candidate = trim((string) $task_uri);
+      $candidate_key = $this->normalizeUriForKey($candidate);
+      if ($candidate_key !== '') {
+        $deduped[$candidate_key] = $candidate;
+      }
+    }
+
+    $sorted = array_values($deduped);
+    usort($sorted, function (string $left_uri, string $right_uri): int {
+      return $this->compareTaskUrisByCode($left_uri, $right_uri);
+    });
+
+    return $sorted;
+  }
+
+  /**
+   * Infer missing parent/child task hierarchy from URI code patterns.
+   */
+  protected function inferTaskHierarchyByUriPattern(array &$task_map, string $top_task_uri = ''): array {
+    if (count($task_map) < 2) {
+      return [];
+    }
+
+    $task_key_by_code = [];
+    foreach ($task_map as $task_key => $task) {
+      $task_uri = $this->extractTaskUri($task);
+      if ($task_uri === '') {
+        continue;
+      }
+
+      $task_code = $this->extractTaskCodeFromUri($task_uri);
+      if ($task_code !== '') {
+        $task_key_by_code[$task_code] = $task_key;
+      }
+    }
+
+    $top_task_key = '';
+    foreach ($this->taskUriVariants($top_task_uri) as $top_task_candidate_uri) {
+      $candidate_key = $this->normalizeUriForKey($top_task_candidate_uri);
+      if ($candidate_key !== '' && isset($task_map[$candidate_key])) {
+        $top_task_key = $candidate_key;
+        break;
+      }
+    }
+
+    if ($top_task_key === '' && isset($task_key_by_code['0001'])) {
+      $top_task_key = $task_key_by_code['0001'];
+    }
+
+    if ($top_task_key === '') {
+      $grouped_root_codes = [];
+      foreach ($task_key_by_code as $task_code => $task_key) {
+        if (preg_match('/^[0-9]{4}$/', $task_code) === 1) {
+          $grouped_root_codes[$task_code] = $task_key;
+        }
+      }
+
+      if (!empty($grouped_root_codes)) {
+        uksort($grouped_root_codes, 'strnatcasecmp');
+        $top_task_key = (string) reset($grouped_root_codes);
+      }
+    }
+
+    $children_by_parent = [];
+
+    foreach ($task_map as $task_key => $task) {
+      if ($top_task_key !== '' && $task_key === $top_task_key) {
+        continue;
+      }
+
+      $task_uri = $this->extractTaskUri($task);
+      if ($task_uri === '') {
+        continue;
+      }
+
+      $task_code = $this->extractTaskCodeFromUri($task_uri);
+      if ($task_code === '') {
+        continue;
+      }
+
+      $parent_key = '';
+
+      if (preg_match('/^([0-9]{1,4})([A-Z]+)$/', $task_code, $matches) === 1) {
+        $parent_code = str_pad((string) ($matches[1] ?? ''), 4, '0', STR_PAD_LEFT);
+        if (isset($task_key_by_code[$parent_code])) {
+          $parent_key = $task_key_by_code[$parent_code];
+        }
+      }
+
+      if ($parent_key === '' || $parent_key === $task_key || !isset($task_map[$parent_key])) {
+        continue;
+      }
+
+      $parent_uri = $this->extractTaskUri($task_map[$parent_key]);
+      if ($parent_uri === '') {
+        continue;
+      }
+
+      $current_parent_uri = $this->extractTaskParentUri($task_map[$task_key]);
+      if ($current_parent_uri === '') {
+        $task_map[$task_key]['hasSupertaskUri'] = $parent_uri;
+        $task_map[$task_key]['hasSupertask'] = $parent_uri;
+      }
+
+      if (!isset($children_by_parent[$parent_key])) {
+        $children_by_parent[$parent_key] = [];
+      }
+      $children_by_parent[$parent_key][$this->normalizeUriForKey($task_uri)] = $task_uri;
+    }
+
+    foreach ($children_by_parent as $parent_key => $child_uri_map) {
+      if (!isset($task_map[$parent_key])) {
+        continue;
+      }
+
+      $existing_subtasks = [];
+      foreach ($this->extractTaskSubtaskUris($task_map[$parent_key]) as $subtask_uri) {
+        $subtask_key = $this->normalizeUriForKey($subtask_uri);
+        if ($subtask_key !== '') {
+          $existing_subtasks[$subtask_key] = $subtask_uri;
+        }
+      }
+
+      $children_by_parent[$parent_key] = array_merge($existing_subtasks, $child_uri_map);
+    }
+
+    return $children_by_parent;
+  }
+
+  /**
+   * Merge task collections by canonical URI.
+   */
+  protected function mergeTaskCollections(array $base_tasks, array $extra_tasks): array {
+    $merged = [];
+
+    foreach (array_merge($base_tasks, $extra_tasks) as $task) {
+      if (is_object($task)) {
+        $task = (array) $task;
+      }
+      if (!is_array($task)) {
+        continue;
+      }
+
+      $task = $this->normalizeTaskShapeForCanvas($task);
+      $task_uri = $this->extractTaskUri($task);
+      $task_key = $this->normalizeUriForKey($task_uri);
+      if ($task_key === '') {
+        continue;
+      }
+
+      $merged[$task_key] = $task;
+    }
+
+    return array_values($merged);
+  }
+
+  /**
+   * Build WKF task URI prefix from process URI (../PROC/<id> -> ../TSK/<id>).
+   */
+  protected function buildTaskUriPrefixFromProcessUri(string $process_uri): string {
+    $normalized = $this->normalizeUriForKey($process_uri);
+    if ($normalized === '') {
+      return '';
+    }
+
+    if (preg_match('#^(.*)/PROC/[^/]+$#i', $normalized, $matches)) {
+      return rtrim((string) ($matches[1] ?? ''), '/');
+    }
+
+    return '';
+  }
+
+  /**
+   * List all task entities (paged) for fallback process reconstruction.
+   */
+  protected function listAllTasks(int $page_size = 200, int $max_pages = 20): array {
+    $all_tasks = [];
+
+    for ($page = 0; $page < $max_pages; $page++) {
+      $offset = $page * $page_size;
+
+      try {
+        $list_response = $this->listTasks($page_size, $offset);
+      }
+      catch (\Throwable $e) {
+        break;
+      }
+
+      $list = $list_response;
+      if (is_array($list_response) && array_key_exists('body', $list_response)) {
+        $list = $list_response['body'];
+      }
+
+      if (!is_array($list) || count($list) === 0) {
+        break;
+      }
+
+      foreach ($list as $task) {
+        if (is_object($task)) {
+          $task = (array) $task;
+        }
+        if (is_array($task)) {
+          $all_tasks[] = $task;
+        }
+      }
+
+      if (count($list) < $page_size) {
+        break;
+      }
+    }
+
+    return $all_tasks;
+  }
+
+  /**
+   * Order tasks from top task through child links, then append leftovers.
+   */
+  protected function orderTasksByHierarchy(array $tasks, string $top_task_uri): array {
+    $task_map = [];
+    foreach ($tasks as $task) {
+      if (is_object($task)) {
+        $task = (array) $task;
+      }
+      if (!is_array($task)) {
+        continue;
+      }
+
+      $task_uri = $this->extractTaskUri($task);
+      $task_key = $this->normalizeUriForKey($task_uri);
+      if ($task_key === '') {
+        continue;
+      }
+
+      $task_map[$task_key] = $task;
+    }
+
+    if (empty($task_map)) {
+      return [];
+    }
+
+    $ordered = [];
+    $seen = [];
+
+    $walk = function (string $candidate_uri) use (&$walk, &$ordered, &$seen, $task_map): void {
+      $candidate_key = $this->normalizeUriForKey($candidate_uri);
+      if ($candidate_key === '' || isset($seen[$candidate_key]) || !isset($task_map[$candidate_key])) {
+        return;
+      }
+
+      $seen[$candidate_key] = TRUE;
+      $task = $task_map[$candidate_key];
+      $ordered[] = $task;
+
+      foreach ($this->extractTaskSubtaskUris($task) as $subtask_uri) {
+        $walk($subtask_uri);
+      }
+    };
+
+    foreach ($this->taskUriVariants($top_task_uri) as $candidate_top_uri) {
+      $walk($candidate_top_uri);
+    }
+    if (empty($ordered)) {
+      $walk($top_task_uri);
+    }
+
+    foreach ($task_map as $task_key => $task) {
+      if (!isset($seen[$task_key])) {
+        $ordered[] = $task;
+      }
+    }
+
+    return $ordered;
+  }
+
+  /**
+   * Fallback task collection when top-task recursion is not enough.
+   */
+  protected function collectTasksByProcessFallback(string $process_uri, string $top_task_uri): array {
+    $normalized_process_uri = $this->normalizeUriForKey($process_uri);
+    if ($normalized_process_uri === '') {
+      return [];
+    }
+
+    $task_prefix = $this->buildTaskUriPrefixFromProcessUri($process_uri);
+    $task_prefix_key = strtolower($this->normalizeUriForKey($task_prefix));
+    $task_prefix_marker = $task_prefix_key !== ''
+      ? rtrim($task_prefix_key, '/') . '/tsk/'
+      : '';
+
+    $candidate_map = [];
+    $add_candidate = function (array $task) use (&$candidate_map): void {
+      $task = $this->normalizeTaskShapeForCanvas($task);
+      $task_uri = $this->extractTaskUri($task);
+      $task_key = $this->normalizeUriForKey($task_uri);
+      if ($task_key !== '') {
+        $candidate_map[$task_key] = $task;
+      }
+    };
+
+    $top_task = $this->resolveTaskByUri($top_task_uri);
+    if (is_array($top_task) && empty($top_task['error'])) {
+      $add_candidate($top_task);
+    }
+
+    foreach ($this->listAllTasks(200, 20) as $candidate) {
+      if (!is_array($candidate) || !$this->isTaskEntity($candidate)) {
+        continue;
+      }
+
+      $candidate_uri = $this->extractTaskUri($candidate);
+      if ($candidate_uri === '') {
+        continue;
+      }
+
+      $belongs_to_process = FALSE;
+
+      $candidate_process_uri = $this->extractTaskProcessUri($candidate);
+      if ($candidate_process_uri !== '') {
+        $belongs_to_process = ($this->normalizeUriForKey($candidate_process_uri) === $normalized_process_uri);
+      }
+
+      if (!$belongs_to_process && $task_prefix_marker !== '') {
+        $candidate_key = strtolower($this->normalizeUriForKey($candidate_uri));
+        $belongs_to_process = ($candidate_key !== '' && str_starts_with($candidate_key, $task_prefix_marker));
+      }
+
+      if (!$belongs_to_process) {
+        continue;
+      }
+
+      $resolved = $this->resolveTaskByUri($candidate_uri);
+      if (is_array($resolved) && empty($resolved['error']) && $this->isTaskEntity($resolved)) {
+        $add_candidate($resolved);
+      }
+      else {
+        $add_candidate($candidate);
+      }
+    }
+
+    if (empty($candidate_map)) {
+      return [];
+    }
+
+    $normalized = $this->normalizeTaskCollectionForCanvas(array_values($candidate_map), $top_task_uri);
+    return $this->orderTasksByHierarchy($normalized, $top_task_uri);
   }
 
   /**
@@ -1424,47 +2324,65 @@ class CttHascoClient {
    * Returns the updated task body (unwrapped).
    */
   public function setTaskRequiredInstruments(string $task_uri, array $required_instrument): array {
-    // IMPORTANT: hascoapi's TaskAPI.setRequiredInstruments implementation is strict and
-    // currently rejects requiredComponents unless containerSlotUri is present and reads
-    // componentUri from the wrong JSON level.
-    //
-    // To keep Drupal+CTT working across hascoapi branches (and without backend changes),
-    // we:
-    //  1) Persist the full instrument+component selection locally (KV override), and
-    //  2) Send ONLY instrumentUri entries to hascoapi so the call succeeds.
-
     // Persist a local copy (full fidelity) to remain robust to API branch differences.
     $this->saveTaskInstrumentOverride($task_uri, $required_instrument);
 
-    // Strip components for hascoapi payload.
-    $api_required_instrument = [];
-    foreach ($required_instrument as $entry) {
+    // Build a legacy-safe payload (instrument only), and a full payload (includes components).
+    $api_required_instrument = $this->buildTaskRequiredInstrumentApiEntries($required_instrument, FALSE);
+    $api_required_instrument_full = $this->buildTaskRequiredInstrumentApiEntries($required_instrument, TRUE);
+
+    $has_components = FALSE;
+    foreach ($api_required_instrument_full as $entry) {
       if (!is_array($entry)) {
         continue;
       }
-      $instrument_uri = trim((string) ($entry['instrumentUri'] ?? ''));
-      if ($instrument_uri === '') {
-        continue;
+      $components = $entry['requiredComponents'] ?? [];
+      if (is_array($components) && !empty($components)) {
+        $has_components = TRUE;
+        break;
       }
-      $api_required_instrument[] = [
-        'instrumentUri' => $instrument_uri,
-      ];
     }
 
     // Avoid calling hascoapi with an empty list (it 400s). In this case we only update
     // the local override.
     if (!empty($api_required_instrument)) {
-      $payload = [
-        // Note: hascoapi Java controller expects lowercase 'taskuri'.
-        'taskuri' => $task_uri,
-        'requiredInstrument' => $api_required_instrument,
-      ];
-
+      // Note: hascoapi Java controller expects lowercase 'taskuri'.
       // This endpoint returns plain text on success (not JSON). We treat it as best-effort
       // and then fetch the task by URI to return a consistent JSON object to the frontend.
-      $this->request('POST', '/hascoapi/api/task/instruments', [
-        'json' => $payload,
-      ]);
+      if ($has_components) {
+        try {
+          $full_response = $this->request('POST', '/hascoapi/api/task/instruments', [
+            'json' => [
+              'taskuri' => $task_uri,
+              'requiredInstrument' => $api_required_instrument_full,
+            ],
+          ]);
+          $this->assertOperationSuccessful($full_response, 'Task instruments (full payload)');
+        }
+        catch (\Throwable $e) {
+          $this->logger->warning('Task instrument full payload rejected for @task. Retrying legacy payload: @error', [
+            '@task' => $task_uri,
+            '@error' => $e->getMessage(),
+          ]);
+
+          $legacy_response = $this->request('POST', '/hascoapi/api/task/instruments', [
+            'json' => [
+              'taskuri' => $task_uri,
+              'requiredInstrument' => $api_required_instrument,
+            ],
+          ]);
+          $this->assertOperationSuccessful($legacy_response, 'Task instruments (legacy payload)');
+        }
+      }
+      else {
+        $legacy_response = $this->request('POST', '/hascoapi/api/task/instruments', [
+          'json' => [
+            'taskuri' => $task_uri,
+            'requiredInstrument' => $api_required_instrument,
+          ],
+        ]);
+        $this->assertOperationSuccessful($legacy_response, 'Task instruments (legacy payload)');
+      }
     }
 
     return $this->getByUri($task_uri);

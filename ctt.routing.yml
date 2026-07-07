@@ -97,6 +97,17 @@ ctt.api.process.create:
     _permission: 'create ctt workflow'
   methods: [POST]
 
+ctt.api.process.update:
+  path: '/workflow/api/process/{process_uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::updateProcess'
+  requirements:
+    _permission: 'edit ctt workflow'
+    process_uri: '.+'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
+
 ctt.api.process.delete:
   path: '/workflow/api/process/delete'
   defaults:
@@ -111,6 +122,17 @@ ctt.api.process.tree:
     _controller: '\Drupal\ctt\Controller\CttApiController::getProcessTree'
   requirements:
     _permission: 'access ctt editor'
+
+ctt.api.process.tasks:
+  path: '/workflow/api/process/{process_uri}/tasks'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcessTasks'
+  requirements:
+    _permission: 'access ctt editor'
+    process_uri: '.+'
+  methods: [GET]
+  options:
+    no_cache: TRUE
 
 # Version history (local-only). The editor calls this with an encoded URI
 # that may contain decoded slashes under Apache, so allow any chars.
@@ -182,6 +204,39 @@ ctt.api.task.create:
   requirements:
     _permission: 'edit ctt workflow'
   methods: [POST]
+
+ctt.api.task.update:
+  path: '/workflow/api/task/{task_uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::updateTask'
+  requirements:
+    _permission: 'edit ctt workflow'
+    task_uri: '.+'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
+
+ctt.api.task.children:
+  path: '/workflow/api/task/{task_uri}/children'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getTaskChildren'
+  requirements:
+    _permission: 'access ctt editor'
+    task_uri: '.+'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.task.dependency:
+  path: '/workflow/api/task/{task_uri}/dependency'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::setTaskDependency'
+  requirements:
+    _permission: 'edit ctt workflow'
+    task_uri: '.+'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
 
 ctt.api.task.delete:
   path: '/workflow/api/task/delete'

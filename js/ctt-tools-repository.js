@@ -45,6 +45,36 @@
     }
   };
 
+  const isHttpUri = function (value) {
+    return /^https?:\/\//i.test(String(value || "").trim());
+  };
+
+  const normalizeUriFieldValue = function (element) {
+    if (!element) {
+      return "";
+    }
+
+    const normalized = String(element.value || "").trim();
+    element.value = normalized;
+    return normalized;
+  };
+
+  const validateOptionalUriField = function (value, label) {
+    const normalized = String(value || "").trim();
+    if (normalized === "") {
+      return { ok: true, value: "" };
+    }
+
+    if (!isHttpUri(normalized)) {
+      return {
+        ok: false,
+        message: label + " must be an absolute http(s) URI."
+      };
+    }
+
+    return { ok: true, value: normalized };
+  };
+
   const setFeedback = function (state, type, message) {
     if (!state.feedback) {
       return;
@@ -344,7 +374,27 @@
       return;
     }
 
-    const studyUri = getStudyUri(state);
+    const studyUri = normalizeUriFieldValue(state.filterStudyUri);
+    const scenarioUri = normalizeUriFieldValue(state.toolScenarioUri);
+    const datasetUri = normalizeUriFieldValue(state.toolDatasetUri);
+    const sourceRepositoryUri = normalizeUriFieldValue(state.toolSourceUri);
+    const artifactUri = normalizeUriFieldValue(state.toolArtifactUri);
+
+    const uriChecks = [
+      validateOptionalUriField(studyUri, "Study URI"),
+      validateOptionalUriField(scenarioUri, "Scenario URI"),
+      validateOptionalUriField(datasetUri, "Dataset URI"),
+      validateOptionalUriField(sourceRepositoryUri, "Source Repository URI"),
+      validateOptionalUriField(artifactUri, "Artifact URI")
+    ];
+
+    for (let i = 0; i < uriChecks.length; i += 1) {
+      if (uriChecks[i] && uriChecks[i].ok === false) {
+        setFeedback(state, "warning", String(uriChecks[i].message || "One URI field is invalid."));
+        return;
+      }
+    }
+
     const payload = {
       action: "upsert",
       studyUri: studyUri || undefined,
@@ -357,11 +407,11 @@
         releaseDate: String(state.toolReleaseDate && state.toolReleaseDate.value || "").trim(),
         author: String(state.toolAuthor && state.toolAuthor.value || "").trim(),
         institution: String(state.toolInstitution && state.toolInstitution.value || "").trim(),
-        scenarioUri: String(state.toolScenarioUri && state.toolScenarioUri.value || "").trim(),
-        datasetUri: String(state.toolDatasetUri && state.toolDatasetUri.value || "").trim(),
-        sourceRepositoryUri: String(state.toolSourceUri && state.toolSourceUri.value || "").trim(),
+        scenarioUri: scenarioUri,
+        datasetUri: datasetUri,
+        sourceRepositoryUri: sourceRepositoryUri,
         artifactFilename: String(state.toolArtifactFilename && state.toolArtifactFilename.value || "").trim(),
-        artifactUri: String(state.toolArtifactUri && state.toolArtifactUri.value || "").trim(),
+        artifactUri: artifactUri,
         tags: toTagArray(state.toolTags && state.toolTags.value || ""),
         description: String(state.toolDescription && state.toolDescription.value || "").trim(),
       },
