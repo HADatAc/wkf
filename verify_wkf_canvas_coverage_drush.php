@@ -51,6 +51,10 @@ function wkf_cov_normalize_uri(string $uri): string {
   return str_replace('#/', '#', trim($uri));
 }
 
+function wkf_cov_normalize_text(string $value): string {
+  return trim((string) preg_replace('/\s+/', ' ', trim($value)));
+}
+
 function wkf_cov_is_runtime_binding_uri(string $uri): bool {
   $normalized = wkf_cov_normalize_uri($uri);
   if ($normalized === '') {
@@ -327,6 +331,12 @@ function wkf_cov_extract_expected_from_xlsx(string $xlsxPath): array {
     'taskCount' => 0,
     'tasks' => [],
     'taskAssignments' => [],
+    'taskObjectives' => [],
+    'processEducational' => [
+      'hasLearningObjectives' => '',
+      'hasCriticalActions' => '',
+      'hasDebriefingFocus' => '',
+    ],
     'topSubtaskUris' => [],
     'errors' => $workbook['errors'],
   ];
@@ -360,6 +370,9 @@ function wkf_cov_extract_expected_from_xlsx(string $xlsxPath): array {
     $processRow = $processRows[1];
     $result['processUri'] = wkf_cov_cell($processRow, $processHeader, ['hasURI']);
     $result['topTaskUri'] = wkf_cov_cell($processRow, $processHeader, ['vstoi:hasTopTask', 'hasTopTask', 'hasTopTaskUri']);
+    $result['processEducational']['hasLearningObjectives'] = wkf_cov_normalize_text(wkf_cov_cell($processRow, $processHeader, ['vstoi:hasLearningObjectives', 'hasLearningObjectives']));
+    $result['processEducational']['hasCriticalActions'] = wkf_cov_normalize_text(wkf_cov_cell($processRow, $processHeader, ['vstoi:hasCriticalActions', 'hasCriticalActions']));
+    $result['processEducational']['hasDebriefingFocus'] = wkf_cov_normalize_text(wkf_cov_cell($processRow, $processHeader, ['vstoi:hasDebriefingFocus', 'hasDebriefingFocus']));
   }
 
   $taskHeader = wkf_cov_header_map($taskRows[0]);
@@ -414,13 +427,23 @@ function wkf_cov_extract_expected_from_xlsx(string $xlsxPath): array {
     ]);
     $requiredUris = wkf_cov_parse_delimited_uris($requiredRaw);
 
+    $supportsObjective = wkf_cov_normalize_text(wkf_cov_cell($taskRow, $taskHeader, [
+      'vstoi:supportsObjective',
+      'supportsObjective',
+    ]));
+
     $taskMap[$taskKey] = [
       'uri' => $taskUri,
       'label' => $label,
       'parentUri' => $parentUri,
       'subtaskUris' => $subtaskUris,
       'requiredInstrumentUris' => $requiredUris,
+      'supportsObjective' => $supportsObjective,
     ];
+
+    if ($supportsObjective !== '') {
+      $result['taskObjectives'][$taskKey] = $supportsObjective;
+    }
   }
 
   if (empty($taskMap)) {
@@ -686,25 +709,28 @@ function wkf_cov_process_uri_variants(string $uri): array {
       return;
     }
 
-    $variants[wkf_cov_normalize_uri($candidate)] = $candidate;
+    $variants[$candidate] = $candidate;
   };
 
-  $add($uri);
-  $add(str_replace('#/', '#', $uri));
-
+  $seed = [$uri, str_replace('#/', '#', $uri)];
   if (strpos($uri, '#') !== FALSE && strpos($uri, '#/') === FALSE) {
-    $add(str_replace('#', '#/', $uri));
+    $seed[] = str_replace('#', '#/', $uri);
   }
 
-  if (str_starts_with($uri, 'http://')) {
-    $https = 'https://' . substr($uri, 7);
-    $add($https);
-    $add(str_replace('#/', '#', $https));
-  }
-  elseif (str_starts_with($uri, 'https://')) {
-    $http = 'http://' . substr($uri, 8);
-    $add($http);
-    $add(str_replace('#/', '#', $http));
+  foreach ($seed as $seedUri) {
+    $seedUri = trim((string) $seedUri);
+    if ($seedUri === '') {
+      continue;
+    }
+
+    $add($seedUri);
+
+    if (str_starts_with($seedUri, 'http://')) {
+      $add('https://' . substr($seedUri, 7));
+    }
+    elseif (str_starts_with($seedUri, 'https://')) {
+      $add('http://' . substr($seedUri, 8));
+    }
   }
 
   return array_values($variants);
@@ -716,7 +742,7 @@ function wkf_cov_add_process_uri_candidate(array &$bucket, string $uri): void {
   }
 
   foreach (wkf_cov_process_uri_variants($uri) as $variant) {
-    $key = wkf_cov_normalize_uri($variant);
+    $key = trim((string) $variant);
     if ($key !== '') {
       $bucket[$key] = $variant;
     }
@@ -899,8 +925,14 @@ function wkf_cov_empty_tree_result(): array {
     'status' => 0,
     'payload' => [],
     'process' => [],
+    'processEducational' => [
+      'hasLearningObjectives' => '',
+      'hasCriticalActions' => '',
+      'hasDebriefingFocus' => '',
+    ],
     'tasks' => [],
     'taskAssignments' => [],
+    'taskObjectives' => [],
     'topTaskUri' => '',
     'topSubtaskUris' => [],
   ];
@@ -968,9 +1000,15 @@ function wkf_cov_get_process_tree(string $processUri): array {
 
   $tasks = is_array($payload['tasks'] ?? NULL) ? $payload['tasks'] : [];
   $process = is_array($payload['process'] ?? NULL) ? $payload['process'] : [];
+  $processEducational = [
+    'hasLearningObjectives' => wkf_cov_normalize_text((string) ($process['hasLearningObjectives'] ?? $process['vstoi:hasLearningObjectives'] ?? '')),
+    'hasCriticalActions' => wkf_cov_normalize_text((string) ($process['hasCriticalActions'] ?? $process['vstoi:hasCriticalActions'] ?? '')),
+    'hasDebriefingFocus' => wkf_cov_normalize_text((string) ($process['hasDebriefingFocus'] ?? $process['vstoi:hasDebriefingFocus'] ?? '')),
+  ];
 
   $taskMap = [];
   $taskAssignments = [];
+  $taskObjectives = [];
 
   foreach ($tasks as $task) {
     if (is_object($task)) {
@@ -998,16 +1036,23 @@ function wkf_cov_get_process_tree(string $processUri): array {
       wkf_cov_extract_instrument_uris_from_value($task['hasRequiredInstrumentUris'], $instrumentBucket);
     }
 
+    $supportsObjective = wkf_cov_normalize_text((string) ($task['supportsObjective'] ?? $task['vstoi:supportsObjective'] ?? ''));
+
     $taskMap[$taskKey] = [
       'uri' => $taskUri,
       'label' => $label,
       'parentUri' => $parentUri,
       'subtaskUris' => $subtaskUris,
       'requiredInstrumentUris' => array_values($instrumentBucket),
+      'supportsObjective' => $supportsObjective,
     ];
 
     if (!empty($instrumentBucket)) {
       $taskAssignments[$taskKey] = array_keys($instrumentBucket);
+    }
+
+    if ($supportsObjective !== '') {
+      $taskObjectives[$taskKey] = $supportsObjective;
     }
   }
 
@@ -1037,8 +1082,10 @@ function wkf_cov_get_process_tree(string $processUri): array {
     'status' => $response->getStatusCode(),
     'payload' => $payload,
     'process' => $process,
+    'processEducational' => $processEducational,
     'tasks' => $taskMap,
     'taskAssignments' => $taskAssignments,
+    'taskObjectives' => $taskObjectives,
     'topTaskUri' => $topTaskUri,
     'topSubtaskUris' => array_values($topSubtasks),
   ];
@@ -1118,6 +1165,11 @@ function wkf_cov_compare_expected_actual(array $expected, array $actual): array 
 
   $expectedAssignments = is_array($expected['taskAssignments'] ?? NULL) ? $expected['taskAssignments'] : [];
   $actualAssignments = is_array($actual['taskAssignments'] ?? NULL) ? $actual['taskAssignments'] : [];
+  $expectedObjectives = is_array($expected['taskObjectives'] ?? NULL) ? $expected['taskObjectives'] : [];
+  $actualObjectives = is_array($actual['taskObjectives'] ?? NULL) ? $actual['taskObjectives'] : [];
+
+  $expectedProcessEducational = is_array($expected['processEducational'] ?? NULL) ? $expected['processEducational'] : [];
+  $actualProcessEducational = is_array($actual['processEducational'] ?? NULL) ? $actual['processEducational'] : [];
 
   $instrumentMismatches = [];
   foreach ($expectedAssignments as $taskKey => $expectedInstrumentKeys) {
@@ -1140,23 +1192,61 @@ function wkf_cov_compare_expected_actual(array $expected, array $actual): array 
     }
   }
 
+  $processEducationalMismatches = [];
+  foreach (['hasLearningObjectives', 'hasCriticalActions', 'hasDebriefingFocus'] as $fieldName) {
+    $expectedValue = wkf_cov_normalize_text((string) ($expectedProcessEducational[$fieldName] ?? ''));
+    if ($expectedValue === '') {
+      continue;
+    }
+
+    $actualValue = wkf_cov_normalize_text((string) ($actualProcessEducational[$fieldName] ?? ''));
+    if ($expectedValue !== $actualValue) {
+      $processEducationalMismatches[] = [
+        'field' => $fieldName,
+        'expected' => $expectedValue,
+        'actual' => $actualValue,
+      ];
+    }
+  }
+
+  $taskObjectiveMismatches = [];
+  foreach ($expectedObjectives as $taskKey => $expectedObjectiveValue) {
+    $expectedObjective = wkf_cov_normalize_text((string) $expectedObjectiveValue);
+    if ($expectedObjective === '') {
+      continue;
+    }
+
+    $actualObjective = wkf_cov_normalize_text((string) ($actualObjectives[$taskKey] ?? ($actualTasks[$taskKey]['supportsObjective'] ?? '')));
+    if ($expectedObjective !== $actualObjective) {
+      $taskObjectiveMismatches[] = [
+        'taskUri' => (string) ($expectedTasks[$taskKey]['uri'] ?? $taskKey),
+        'expectedSupportsObjective' => $expectedObjective,
+        'actualSupportsObjective' => $actualObjective,
+      ];
+    }
+  }
+
   $taskSetOk = empty($missingTasks) && empty($extraTasks);
   $hierarchyOk = empty($parentMismatches) && empty($missingTopSubtasks) && empty($extraTopSubtasks);
   $instrumentOk = empty($instrumentMismatches);
+  $objectiveOk = empty($processEducationalMismatches) && empty($taskObjectiveMismatches);
   $treeOk = ((int) ($actual['status'] ?? 0) === 200);
 
   return [
     'taskSetOk' => $taskSetOk,
     'hierarchyOk' => $hierarchyOk,
     'instrumentOk' => $instrumentOk,
+    'objectiveOk' => $objectiveOk,
     'treeOk' => $treeOk,
-    'modelComplete' => $treeOk && $taskSetOk && $hierarchyOk && $instrumentOk,
+    'modelComplete' => $treeOk && $taskSetOk && $hierarchyOk && $instrumentOk && $objectiveOk,
     'missingTasks' => $missingTasks,
     'extraTasks' => $extraTasks,
     'parentMismatches' => $parentMismatches,
     'missingTopSubtasks' => $missingTopSubtasks,
     'extraTopSubtasks' => $extraTopSubtasks,
     'instrumentMismatches' => $instrumentMismatches,
+    'processEducationalMismatches' => $processEducationalMismatches,
+    'taskObjectiveMismatches' => $taskObjectiveMismatches,
   ];
 }
 
@@ -1187,6 +1277,16 @@ function wkf_cov_ingest_wkf_from_file(string $sourceFile, string $label): array 
   $nameParts = pathinfo($baseName);
   $stem = isset($nameParts['filename']) ? (string) $nameParts['filename'] : 'WKF_UPLOAD';
   $ext = isset($nameParts['extension']) ? (string) $nameParts['extension'] : 'xlsx';
+
+  // HASCO ingestion dispatches WKF flow by filename prefix (WKF-).
+  if (stripos($stem, 'WKF-') !== 0) {
+    if (stripos($stem, 'WKF_') === 0) {
+      $stem = 'WKF-' . substr($stem, 4);
+    }
+    else {
+      $stem = 'WKF-' . ltrim($stem, '-_');
+    }
+  }
 
   $destName = $stem . '_AUTO_' . gmdate('Ymd_His') . '.' . $ext;
   $destUri = rtrim($uploadDir, '/') . '/' . $destName;
@@ -1326,6 +1426,8 @@ wkf_cov_emit('EXPECTED_PROCESS_URI', $expected['processUri']);
 wkf_cov_emit('EXPECTED_TOP_TASK_URI', $expected['topTaskUri']);
 wkf_cov_emit('EXPECTED_TASK_COUNT', $expected['taskCount']);
 wkf_cov_emit('EXPECTED_TASK_ASSIGNMENT_COUNT', count($expected['taskAssignments']));
+wkf_cov_emit('EXPECTED_TASK_OBJECTIVE_COUNT', count($expected['taskObjectives']));
+wkf_cov_emit('EXPECTED_PROCESS_EDUCATIONAL', $expected['processEducational']);
 wkf_cov_emit('EXPECTED_TOP_SUBTASKS', $expected['topSubtaskUris']);
 
 $ingest = [
@@ -1438,12 +1540,15 @@ wkf_cov_emit('ACTUAL_TREE_STATUS', (int) $actual['status']);
 wkf_cov_emit('ACTUAL_PROCESS_TOP_TASK_URI', (string) ($actual['topTaskUri'] ?? ''));
 wkf_cov_emit('ACTUAL_TASK_COUNT', count($actual['tasks']));
 wkf_cov_emit('ACTUAL_TASK_ASSIGNMENT_COUNT', count($actual['taskAssignments']));
+wkf_cov_emit('ACTUAL_TASK_OBJECTIVE_COUNT', count($actual['taskObjectives']));
+wkf_cov_emit('ACTUAL_PROCESS_EDUCATIONAL', $actual['processEducational']);
 wkf_cov_emit('ACTUAL_TOP_SUBTASKS', $actual['topSubtaskUris']);
 
 wkf_cov_emit('MODEL_TREE_OK', (bool) $comparison['treeOk']);
 wkf_cov_emit('MODEL_TASK_SET_OK', (bool) $comparison['taskSetOk']);
 wkf_cov_emit('MODEL_HIERARCHY_OK', (bool) $comparison['hierarchyOk']);
 wkf_cov_emit('MODEL_INSTRUMENT_OK', (bool) $comparison['instrumentOk']);
+wkf_cov_emit('MODEL_OBJECTIVE_OK', (bool) $comparison['objectiveOk']);
 wkf_cov_emit('MODEL_COMPLETE', (bool) $comparison['modelComplete']);
 
 wkf_cov_emit('MISSING_TASK_URIS', $comparison['missingTasks']);
@@ -1452,6 +1557,8 @@ wkf_cov_emit('PARENT_MISMATCHES', $comparison['parentMismatches']);
 wkf_cov_emit('MISSING_TOP_SUBTASK_URIS', $comparison['missingTopSubtasks']);
 wkf_cov_emit('EXTRA_TOP_SUBTASK_URIS', $comparison['extraTopSubtasks']);
 wkf_cov_emit('INSTRUMENT_MISMATCHES', $comparison['instrumentMismatches']);
+wkf_cov_emit('PROCESS_EDUCATIONAL_MISMATCHES', $comparison['processEducationalMismatches']);
+wkf_cov_emit('TASK_OBJECTIVE_MISMATCHES', $comparison['taskObjectiveMismatches']);
 
 $summary = [
   'sourceFile' => $sourceFile,
@@ -1459,6 +1566,11 @@ $summary = [
   'processUri' => $processUri,
   'expectedTaskCount' => (int) $expected['taskCount'],
   'actualTaskCount' => count($actual['tasks']),
+  'expectedTaskObjectiveCount' => count($expected['taskObjectives']),
+  'actualTaskObjectiveCount' => count($actual['taskObjectives']),
+  'expectedProcessEducational' => $expected['processEducational'],
+  'actualProcessEducational' => $actual['processEducational'],
+  'objectiveOk' => (bool) $comparison['objectiveOk'],
   'modelComplete' => (bool) $comparison['modelComplete'],
   'ingestSubmitted' => (bool) $ingest['ingestSubmitted'],
   'ingestError' => (string) ($ingest['error'] ?? ''),

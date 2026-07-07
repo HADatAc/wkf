@@ -890,6 +890,233 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Decode URI values received through route placeholders.
+   */
+  protected function decodeRouteEntityUri(string $value): string {
+    $uri = trim($value);
+    if ($uri === '') {
+      return '';
+    }
+
+    if (strpos($uri, '%') !== FALSE) {
+      $decoded = rawurldecode($uri);
+      if (is_string($decoded) && trim($decoded) !== '') {
+        $uri = trim($decoded);
+      }
+    }
+
+    return $uri;
+  }
+
+  /**
+   * Determine whether a payload field carries a meaningful value.
+   */
+  protected function isFilledPayloadValue(mixed $value): bool {
+    if ($value === NULL) {
+      return FALSE;
+    }
+
+    if (is_string($value)) {
+      return trim($value) !== '';
+    }
+
+    if (is_array($value)) {
+      foreach ($value as $item) {
+        if ($this->isFilledPayloadValue($item)) {
+          return TRUE;
+        }
+      }
+      return FALSE;
+    }
+
+    if (is_object($value)) {
+      return $this->isFilledPayloadValue((array) $value);
+    }
+
+    return TRUE;
+  }
+
+  /**
+   * Read the first matching value from an entity map/object.
+   */
+  protected function extractEntityFieldValue(mixed $entity, array $fieldCandidates): mixed {
+    if (is_object($entity)) {
+      $entity = (array) $entity;
+    }
+
+    if (!is_array($entity)) {
+      return NULL;
+    }
+
+    foreach ($fieldCandidates as $fieldName) {
+      if (!is_string($fieldName) || $fieldName === '') {
+        continue;
+      }
+
+      if (!array_key_exists($fieldName, $entity)) {
+        continue;
+      }
+
+      $value = $entity[$fieldName];
+      if ($this->isFilledPayloadValue($value)) {
+        return $value;
+      }
+    }
+
+    return NULL;
+  }
+
+  /**
+   * Fill missing payload fields from a pre-existing entity snapshot.
+   */
+  protected function applyEntityFieldFallbacks(array $payload, mixed $existingEntity, array $fallbackMap): array {
+    if (is_object($existingEntity)) {
+      $existingEntity = (array) $existingEntity;
+    }
+
+    if (!is_array($existingEntity) || empty($fallbackMap)) {
+      return $payload;
+    }
+
+    foreach ($fallbackMap as $targetField => $candidates) {
+      if (!is_string($targetField) || $targetField === '') {
+        continue;
+      }
+
+      if (!is_array($candidates) || empty($candidates)) {
+        continue;
+      }
+
+      if (array_key_exists($targetField, $payload) && $this->isFilledPayloadValue($payload[$targetField])) {
+        continue;
+      }
+
+      $resolved = $this->extractEntityFieldValue($existingEntity, $candidates);
+      if (!$this->isFilledPayloadValue($resolved)) {
+        continue;
+      }
+
+      if (is_object($resolved)) {
+        $resolved = (array) $resolved;
+      }
+
+      $payload[$targetField] = $resolved;
+    }
+
+    return $payload;
+  }
+
+  /**
+   * Parse URI lists from mixed payload values.
+   */
+  protected function extractUriListFromMixedValue(mixed $value): array {
+    if (is_string($value)) {
+      $split = preg_split('/[;,|]+/', $value);
+      if (!is_array($split)) {
+        $split = [$value];
+      }
+
+      $result = [];
+      foreach ($split as $piece) {
+        $candidate = trim((string) $piece);
+        if ($candidate !== '') {
+          $result[] = $candidate;
+        }
+      }
+
+      return array_values(array_unique($result));
+    }
+
+    if (is_object($value)) {
+      $value = (array) $value;
+    }
+
+    if (!is_array($value)) {
+      return [];
+    }
+
+    $resolved = [];
+    foreach ($value as $item) {
+      if (is_string($item)) {
+        $candidate = trim($item);
+        if ($candidate !== '') {
+          $resolved[] = $candidate;
+        }
+        continue;
+      }
+
+      if (is_object($item)) {
+        $item = (array) $item;
+      }
+
+      if (!is_array($item)) {
+        continue;
+      }
+
+      $directUri = trim((string) ($item['uri'] ?? $item['hasURI'] ?? $item['taskUri'] ?? $item['hasTaskUri'] ?? ''));
+      if ($directUri !== '') {
+        $resolved[] = $directUri;
+      }
+
+      foreach ($this->extractUriListFromMixedValue($item) as $nestedUri) {
+        $resolved[] = $nestedUri;
+      }
+    }
+
+    return array_values(array_unique(array_filter(array_map(function ($entry) {
+      return trim((string) $entry);
+    }, $resolved), function ($entry) {
+      return $entry !== '';
+    })));
+  }
+
+  /**
+   * Normalize user-facing temporal operator values to VSTOI URIs.
+   */
+  protected function normalizeTemporalDependencyOperator(string $operator): string {
+    $raw = trim($operator);
+    if ($raw === '') {
+      return '';
+    }
+
+    if ($this->isUri($raw)) {
+      return $raw;
+    }
+
+    $compacted = strtolower((string) preg_replace('/[^a-z]/', '', $raw));
+    $map = [
+      'enabling' => 'EnablingOperator',
+      'enablinginformation' => 'EnablingInformationOperator',
+      'enablinginformationexchange' => 'EnablingInformationOperator',
+      'choice' => 'ChoiceOperator',
+      'parallel' => 'ConcurrencyOperator',
+      'concurrency' => 'ConcurrencyOperator',
+      'independent' => 'OrderIndependencyOperator',
+      'orderindependent' => 'OrderIndependencyOperator',
+      'orderindependency' => 'OrderIndependencyOperator',
+      'interrupts' => 'SuspendResumeOperator',
+      'interruption' => 'SuspendResumeOperator',
+      'suspendresume' => 'SuspendResumeOperator',
+      'iteration' => 'IterationOperator',
+      'loop' => 'IterationOperator',
+    ];
+
+    if (isset($map[$compacted])) {
+      return 'http://hadatac.org/ont/vstoi#' . $map[$compacted];
+    }
+
+    if (str_ends_with($raw, 'Operator')) {
+      return 'http://hadatac.org/ont/vstoi#' . ltrim($raw, '#/');
+    }
+
+    if (preg_match('/^[A-Za-z][A-Za-z0-9]+$/', $raw) === 1) {
+      return 'http://hadatac.org/ont/vstoi#' . $raw . 'Operator';
+    }
+
+    return $raw;
+  }
+
+  /**
    * Infer process URI from request query/referrer context (best effort).
    */
   protected function extractProcessUriFromRequestContext(Request $request): string {
@@ -1954,6 +2181,57 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * GET /workflow/api/process/{process_uri}/tasks
+   */
+  public function getProcessTasks(Request $request, $process_uri) {
+    try {
+      $uri = $this->decodeRouteEntityUri(is_string($process_uri) ? $process_uri : '');
+      if (!$this->isUri($uri)) {
+        return new JsonResponse(['error' => 'Missing or invalid process URI.'], 400);
+      }
+
+      $result = $this->hascoClient->getTasksByProcess($uri);
+      if (is_array($result)) {
+        $this->cacheTaskProcessMappings($result, $uri);
+      }
+
+      return new JsonResponse($result);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
+  /**
+   * PUT /workflow/api/process/{process_uri}
+   */
+  public function updateProcess(Request $request, $process_uri) {
+    $uri = $this->decodeRouteEntityUri(is_string($process_uri) ? $process_uri : '');
+    if (!$this->isUri($uri)) {
+      return new JsonResponse(['error' => 'Missing or invalid process URI.'], 400);
+    }
+
+    $ownerGuard = $this->enforceProcessOwnerForMutation($uri);
+    if ($ownerGuard instanceof JsonResponse) {
+      return $ownerGuard;
+    }
+
+    $data = json_decode($request->getContent(), TRUE);
+    if (!is_array($data)) {
+      $data = [];
+    }
+    $data['uri'] = $uri;
+
+    $proxyRequest = Request::create('/workflow/api/process/create', 'POST', [], [], [], [], json_encode($data));
+    $response = $this->createProcess($proxyRequest);
+    if ($response->getStatusCode() === 201) {
+      $response->setStatusCode(200);
+    }
+
+    return $response;
+  }
+
+  /**
    * POST /workflow/api/process/create
    */
   public function createProcess(Request $request) {
@@ -1961,6 +2239,48 @@ class CttApiController extends ControllerBase {
     if (empty($data)) {
       return new JsonResponse(['error' => 'Invalid JSON body'], 400);
     }
+
+    $requestedProcessUri = $this->decodeRouteEntityUri((string) ($data['uri'] ?? ''));
+    if ($this->isUri($requestedProcessUri)) {
+      $data['uri'] = $requestedProcessUri;
+    }
+
+    $existingProcess = NULL;
+    $existingProcessUri = '';
+    if ($this->isUri((string) ($data['uri'] ?? ''))) {
+      $existingProcessUri = $this->resolveExistingProcessUriVariant((string) $data['uri']);
+      try {
+        $candidate = $this->hascoClient->getByUri($existingProcessUri);
+        if (is_array($candidate) && empty($candidate['error'])) {
+          $existingProcess = $candidate;
+        }
+      }
+      catch (\Throwable $ignored) {
+        $existingProcess = NULL;
+      }
+    }
+
+    if (is_array($existingProcess) && $this->isUri($existingProcessUri) && (string) $this->currentUser()->id() !== '0') {
+      $ownerGuard = $this->enforceProcessOwnerForMutation($existingProcessUri);
+      if ($ownerGuard instanceof JsonResponse) {
+        return $ownerGuard;
+      }
+    }
+
+    $data = $this->applyEntityFieldFallbacks($data, $existingProcess, [
+      'hasLearningObjectives' => ['hasLearningObjectives'],
+      'hasCriticalActions' => ['hasCriticalActions'],
+      'hasDebriefingFocus' => ['hasDebriefingFocus'],
+      'hasTopTaskUri' => ['hasTopTaskUri', 'hasTopTask'],
+      'hasLanguage' => ['hasLanguage', 'language'],
+      'hasVersion' => ['hasVersion', 'version'],
+      'hasStatus' => ['hasStatus', 'status'],
+      'hascoType' => ['hascoType', 'hascoTypeUri'],
+      'typeUri' => ['typeUri'],
+      'label' => ['label', 'hasContent'],
+      'comment' => ['comment', 'description'],
+      'hasSIRManagerEmail' => ['hasSIRManagerEmail', 'managerEmail', 'managedBy'],
+    ]);
 
     $currentOwnerIdentifier = $this->getCurrentUserEmail();
     $requestedOwnerIdentifier = trim((string) ($data['hasSIRManagerEmail'] ?? $data['managerEmail'] ?? ''));
@@ -2331,6 +2651,135 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * PUT /workflow/api/task/{task_uri}
+   */
+  public function updateTask(Request $request, $task_uri) {
+    $uri = $this->decodeRouteEntityUri(is_string($task_uri) ? $task_uri : '');
+    if (!$this->isUri($uri)) {
+      return new JsonResponse(['error' => 'Missing or invalid task URI.'], 400);
+    }
+
+    $ownerGuard = $this->enforceTaskOwnerForMutation($uri);
+    if ($ownerGuard instanceof JsonResponse) {
+      return $ownerGuard;
+    }
+
+    $data = json_decode($request->getContent(), TRUE);
+    if (!is_array($data)) {
+      $data = [];
+    }
+
+    $data['uri'] = $uri;
+    if (!$this->isUri(trim((string) ($data['processUri'] ?? '')))) {
+      $resolvedTaskProcessUri = $this->resolveTaskProcessUri($uri);
+      if ($this->isUri($resolvedTaskProcessUri)) {
+        $data['processUri'] = $resolvedTaskProcessUri;
+      }
+    }
+
+    $proxyRequest = Request::create('/workflow/api/task/create', 'POST', [], [], [], [], json_encode($data));
+    $response = $this->createTask($proxyRequest);
+    if ($response->getStatusCode() === 201) {
+      $response->setStatusCode(200);
+    }
+
+    return $response;
+  }
+
+  /**
+   * GET /workflow/api/task/{task_uri}/children
+   */
+  public function getTaskChildren(Request $request, $task_uri) {
+    try {
+      $uri = $this->decodeRouteEntityUri(is_string($task_uri) ? $task_uri : '');
+      if (!$this->isUri($uri)) {
+        return new JsonResponse(['error' => 'Missing or invalid task URI.'], 400);
+      }
+
+      $task = $this->hascoClient->getByUri($uri);
+      if (!is_array($task) || !empty($task['error'])) {
+        return new JsonResponse([], 200);
+      }
+
+      $childUris = [];
+      foreach (['hasSubtaskUris', 'hasSubtask', 'subtaskUris'] as $fieldName) {
+        if (!array_key_exists($fieldName, $task)) {
+          continue;
+        }
+
+        foreach ($this->extractUriListFromMixedValue($task[$fieldName]) as $candidateUri) {
+          $candidateUri = $this->decodeRouteEntityUri($candidateUri);
+          if ($candidateUri !== '') {
+            $childUris[$candidateUri] = $candidateUri;
+          }
+        }
+      }
+
+      $children = [];
+      foreach (array_values($childUris) as $childUri) {
+        try {
+          $child = $this->hascoClient->getByUri($childUri);
+          if (is_array($child) && empty($child['error'])) {
+            $children[] = $child;
+          }
+        }
+        catch (\Throwable $ignored) {
+          // Skip unresolved children and keep best-effort response.
+        }
+      }
+
+      return new JsonResponse($children);
+    }
+    catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
+  /**
+   * PUT /workflow/api/task/{task_uri}/dependency
+   */
+  public function setTaskDependency(Request $request, $task_uri) {
+    $uri = $this->decodeRouteEntityUri(is_string($task_uri) ? $task_uri : '');
+    if (!$this->isUri($uri)) {
+      return new JsonResponse(['error' => 'Missing or invalid task URI.'], 400);
+    }
+
+    $ownerGuard = $this->enforceTaskOwnerForMutation($uri);
+    if ($ownerGuard instanceof JsonResponse) {
+      return $ownerGuard;
+    }
+
+    $data = json_decode($request->getContent(), TRUE);
+    if (!is_array($data)) {
+      return new JsonResponse(['error' => 'Invalid JSON body'], 400);
+    }
+
+    $operatorRaw = trim((string) ($data['operator'] ?? $data['hasTemporalDependency'] ?? ''));
+    if ($operatorRaw === '') {
+      return new JsonResponse(['error' => 'Missing dependency operator'], 400);
+    }
+
+    $normalizedDependency = $this->normalizeTemporalDependencyOperator($operatorRaw);
+    $updatePayload = [
+      'uri' => $uri,
+      'hasTemporalDependency' => $normalizedDependency,
+    ];
+
+    $resolvedTaskProcessUri = $this->resolveTaskProcessUri($uri);
+    if ($this->isUri($resolvedTaskProcessUri)) {
+      $updatePayload['processUri'] = $resolvedTaskProcessUri;
+    }
+
+    $proxyRequest = Request::create('/workflow/api/task/create', 'POST', [], [], [], [], json_encode($updatePayload));
+    $response = $this->createTask($proxyRequest);
+    if ($response->getStatusCode() === 201) {
+      $response->setStatusCode(200);
+    }
+
+    return $response;
+  }
+
+  /**
    * POST /workflow/api/task/create
    */
   public function createTask(Request $request) {
@@ -2339,9 +2788,60 @@ class CttApiController extends ControllerBase {
       return new JsonResponse(['error' => 'Invalid JSON body'], 400);
     }
 
+    $requestedTaskUri = $this->decodeRouteEntityUri((string) ($data['uri'] ?? ''));
+    if ($this->isUri($requestedTaskUri)) {
+      $data['uri'] = $requestedTaskUri;
+    }
+
+    $existingTask = NULL;
+    $existingTaskUri = trim((string) ($data['uri'] ?? ''));
+    if ($this->isUri($existingTaskUri)) {
+      try {
+        $candidate = $this->hascoClient->getByUri($existingTaskUri);
+        if (is_array($candidate) && empty($candidate['error'])) {
+          $existingTask = $candidate;
+        }
+      }
+      catch (\Throwable $ignored) {
+        $existingTask = NULL;
+      }
+    }
+
+    $data = $this->applyEntityFieldFallbacks($data, $existingTask, [
+      'label' => ['label', 'hasContent'],
+      'comment' => ['comment', 'description'],
+      'hasLanguage' => ['hasLanguage', 'language'],
+      'hasVersion' => ['hasVersion', 'version'],
+      'hasStatus' => ['hasStatus', 'status'],
+      'typeUri' => ['typeUri'],
+      'hascoType' => ['hascoType', 'hascoTypeUri'],
+      'hasSupertaskUri' => ['hasSupertaskUri', 'supertaskUri', 'hasSupertask'],
+      'hasSubtaskUris' => ['hasSubtaskUris', 'subtaskUris', 'hasSubtask'],
+      'hasTemporalDependency' => ['hasTemporalDependency'],
+      'hasIterationConstraint' => ['hasIterationConstraint'],
+      'supportsObjective' => ['supportsObjective'],
+      'hasRequiredInstrumentUris' => ['hasRequiredInstrumentUris'],
+      'processUri' => [
+        'processUri',
+        'workflowUri',
+        'workflowuri',
+        'hasWorkflowUri',
+        'hasProcessUri',
+        'partOfProcessUri',
+        'partOfProcess',
+        'partOf',
+        'hasSIRPartOf',
+        'hasProcess',
+        'process',
+      ],
+    ]);
+
     $taskProcessUri = $this->extractProcessUriFromTaskEntity($data);
+    if (!$this->isUri($taskProcessUri) && is_array($existingTask)) {
+      $taskProcessUri = $this->extractProcessUriFromTaskEntity($existingTask);
+    }
     if (!$this->isUri($taskProcessUri)) {
-      $parentTaskUri = trim((string) ($data['hasSupertaskUri'] ?? $data['supertaskUri'] ?? ''));
+      $parentTaskUri = $this->decodeRouteEntityUri(trim((string) ($data['hasSupertaskUri'] ?? $data['supertaskUri'] ?? '')));
       if ($this->isUri($parentTaskUri)) {
         $taskProcessUri = $this->resolveTaskProcessUri($parentTaskUri);
       }

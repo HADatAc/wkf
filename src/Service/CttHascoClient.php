@@ -1387,9 +1387,34 @@ class CttHascoClient {
     $tree_tasks = $this->collectTaskTree($top_task_uri, $visited);
     $tree_tasks = $this->normalizeTaskCollectionForCanvas($tree_tasks, $top_task_uri);
 
-    // Fallback for legacy ingested templates where only parent links are
-    // available (for example hasParentTask) and root traversal returns 1 node.
-    if (count($tree_tasks) > 1) {
+    // Fallback for legacy ingested templates where relation links are partial.
+    // Trigger it when traversal only returns the root or just first-hop children.
+    $should_fallback = (count($tree_tasks) <= 1);
+    if (!$should_fallback && !empty($tree_tasks)) {
+      $top_key = $this->normalizeUriForKey($top_task_uri);
+      $top_task = NULL;
+
+      foreach ($tree_tasks as $candidate_task) {
+        if (!is_array($candidate_task)) {
+          continue;
+        }
+
+        $candidate_uri = $this->extractTaskUri($candidate_task);
+        if ($this->normalizeUriForKey($candidate_uri) === $top_key) {
+          $top_task = $candidate_task;
+          break;
+        }
+      }
+
+      if (is_array($top_task)) {
+        $direct_subtask_count = count($this->extractTaskSubtaskUris($top_task));
+        if ($direct_subtask_count > 0 && count($tree_tasks) <= (1 + $direct_subtask_count)) {
+          $should_fallback = TRUE;
+        }
+      }
+    }
+
+    if (!$should_fallback) {
       return $tree_tasks;
     }
 
