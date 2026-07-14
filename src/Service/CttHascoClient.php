@@ -1371,20 +1371,88 @@ class CttHascoClient {
   }
 
   /**
-   * Get all tasks belonging to a process.
+   * Get all tasks belonging to a process (flat list, one node per task).
+   *
+   * Prefers the hardened server-side bulk endpoint added in hascoapi
+   * (GET /hascoapi/api/process/{uri}/tasks) which traverses the task graph in
+   * a single call with cross-graph de-duplication. Each returned task carries
+   * hasSubtaskUris / hasRequiredInstrumentUris as plain URI lists — the tree
+   * structure (hasSupertaskUri) the editor needs; per-task detail (enriched
+   * instruments) is fetched on demand via getByUri.
+   *
+   * Falls back to the recursive per-URI walk when the endpoint is unavailable
+   * (older hascoapi) so the module keeps working across API versions.
    */
   public function getTasksByProcess(string $process_uri): array {
-    // Get the process to find its top task URI.
+    $tasks = $this->fetchTasksByProcessBulk($process_uri);
+    if ($tasks !== NULL) {
+      return $tasks;
+    }
+
+    // Legacy fallback: resolve the top task, then walk the tree via getByUri.
     $process = $this->getByUri($process_uri);
     $top_task_uri = trim((string) ($process['hasTopTaskUri'] ?? $process['hasTopTask'] ?? ''));
-
     if ($top_task_uri === '') {
       return [];
     }
-
-    // Recursively collect tasks starting from the top task.
     $visited = [];
     return $this->collectTaskTree($top_task_uri, $visited);
+  }
+
+  /**
+   * Fetch the process task graph via the bulk endpoint.
+   *
+   * @return array|null
+   *   The flat task list on success (possibly empty when the process has a
+   *   top task that does not resolve), or NULL when the endpoint is
+   *   unavailable/unusable so the caller can fall back to the legacy walk.
+   */
+  protected function fetchTasksByProcessBulk(string $process_uri): ?array {
+    $endpoint = '/hascoapi/api/process/' . rawurlencode($process_uri) . '/tasks';
+    try {
+      $response = $this->request('GET', $endpoint);
+    }
+    catch (\Throwable $e) {
+      $this->logger->debug('CTT bulk process/tasks endpoint failed for @uri (@msg); using legacy walk.', [
+        '@uri' => $process_uri,
+        '@msg' => $e->getMessage(),
+      ]);
+      return NULL;
+    }
+
+    if (($response['isSuccessful'] ?? NULL) === FALSE) {
+      return NULL;
+    }
+
+    $body = $response['body'] ?? $response;
+    if (!is_array($body) || !array_key_exists('tasks', $body) || !is_array($body['tasks'])) {
+      // Endpoint absent or returned an unexpected shape.
+      return NULL;
+    }
+
+    $tasks = [];
+    foreach ($body['tasks'] as $task) {
+      if (is_object($task)) {
+        $task = (array) $task;
+      }
+      if (!is_array($task) || (!isset($task['uri']) && !isset($task['hasURI']))) {
+        continue;
+      }
+
+      // The bulk endpoint returns hasRequiredInstrumentUris (plain URIs). Enrich
+      // to the same requiredInstrument object shape the walk produced so the
+      // editor's task parser keeps rendering instruments (no calls when a task
+      // has no instruments; identical cost to the legacy walk when it does).
+      if ($this->isTaskEntity($task)) {
+        $task_uri = trim((string) ($task['uri'] ?? $task['hasURI'] ?? ''));
+        $task = $this->enrichTaskRequiredInstruments($task);
+        $task = $this->applyTaskInstrumentOverride($task, $task_uri);
+      }
+
+      $tasks[] = $task;
+    }
+
+    return $tasks;
   }
 
   /**
