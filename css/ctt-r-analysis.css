@@ -1,0 +1,209 @@
+.ctt-r-analysis-page {
+  margin: 0;
+}
+
+.ctt-r-analysis-page .ctt-r-intro {
+  margin-bottom: 0.5rem;
+}
+
+.ctt-r-analysis-page .ctt-r-feedback {
+  margin: 0;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.ctt-r-analysis-page .ctt-r-feedback-floating {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 1rem;
+  width: min(960px, calc(100vw - 1rem));
+  z-index: 1200;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.2);
+}
+
+.ctt-r-analysis-page .ctt-r-feedback-message {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ctt-r-analysis-page .ctt-r-feedback-close {
+  flex: 0 0 auto;
+}
+
+.ctt-r-analysis-page #ctt-r-no-mock-note {
+  margin-bottom: 0.75rem;
+}
+
+.ctt-r-analysis-page .ctt-r-context-summary {
+  font-size: 0.95rem;
+}
+
+.ctt-r-analysis-page .ctt-r-validate-check {
+  margin-bottom: 0;
+  padding-top: 0.2rem;
+}
+
+.ctt-r-analysis-page .ctt-r-template-actions {
+  align-items: end;
+}
+
+.ctt-r-analysis-page .ctt-r-persistence-note {
+  margin-top: 0.35rem;
+  font-size: 0.82rem;
+}
+
+.ctt-r-analysis-page .ctt-r-context-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.ctt-r-analysis-page .ctt-r-context-list li {
+  margin-bottom: 0.45rem;
+}
+
+.ctt-r-analysis-page .ctt-r-uri-preview {
+  margin-top: 0.15rem;
+  color: #4b5563;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.ctt-r-analysis-page .ctt-r-response-output {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  background: #0f172a;
+  color: #dbeafe;
+  border: 1px solid #1e293b;
+  border-radius: 0.4rem;
+  padding: 0.75rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics {
+  border: 1px solid #d7dee7;
+  border-radius: 0.45rem;
+  background: #f8fafc;
+  color: #0f172a;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.87rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-muted {
+  background: #f1f5f9;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-status {
+  margin-bottom: 0.55rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.5rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.35rem;
+  background: #ffffff;
+  padding: 0.4rem 0.5rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-key {
+  font-size: 0.73rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-value {
+  color: #0f172a;
+  font-size: 0.84rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-section {
+  margin-top: 0.45rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.2rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-note {
+  margin: 0.25rem 0 0;
+  color: #334155;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-issues {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.ctt-r-analysis-page .ctt-r-diagnostics-issues li {
+  margin-bottom: 0.3rem;
+}
+
+.ctt-r-analysis-page .ctt-r-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.16rem 0.5rem;
+  font-size: 0.72rem;
+  margin-right: 0.2rem;
+  line-height: 1.3;
+}
+
+.ctt-r-analysis-page .ctt-r-badge-success {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.ctt-r-analysis-page .ctt-r-badge-danger {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.ctt-r-analysis-page .ctt-r-badge-warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.ctt-r-analysis-page .ctt-r-badge-neutral {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+
+.ctt-r-analysis-page .ctt-r-break-all {
+  word-break: break-all;
+}
+
+.ctt-r-analysis-page .ctt-r-inline-hint {
+  margin-top: 0.3rem;
+  font-size: 0.79rem;
+}
+
+.ctt-r-analysis-page .ctt-r-inline-error {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: #b91c1c;
+}
+
+.ctt-r-analysis-page .ctt-r-field-invalid {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 0.18rem rgba(220, 38, 38, 0.15);
+}
+
+.ctt-r-analysis-page .ctt-r-field-valid {
+  border-color: #16a34a;
+  box-shadow: 0 0 0 0.18rem rgba(22, 163, 74, 0.12);
+}

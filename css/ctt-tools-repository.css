@@ -1,0 +1,22 @@
+.ctt-tools-repository-page .ctt-analytical-tools-table {
+  min-width: 1480px;
+}
+
+.ctt-tools-repository-page .ctt-tools-actions {
+  white-space: nowrap;
+}
+
+.ctt-tools-repository-page .ctt-tools-actions .btn {
+  margin-right: 4px;
+  margin-bottom: 4px;
+}
+
+.ctt-tools-repository-page .ctt-tools-uri {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+.ctt-tools-repository-page code {
+  word-break: break-all;
+}

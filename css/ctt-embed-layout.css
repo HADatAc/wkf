@@ -1,0 +1,125 @@
+/* Fullscreen/no-margin layout only for CTT editor pages. */
+
+html body.path-ctt-editor,
+html body.path-ctt-editor-process {
+  margin: 0 !important;
+  overflow: hidden !important;
+  height: 100%;
+}
+
+body.path-ctt-editor,
+body.path-ctt-editor-process,
+body.path-ctt-editor #page-wrapper,
+body.path-ctt-editor-process #page-wrapper,
+body.path-ctt-editor #page,
+body.path-ctt-editor-process #page {
+  height: 100%;
+}
+
+/* Column layout: editor fills space above footer. */
+body.path-ctt-editor #page,
+body.path-ctt-editor-process #page {
+  display: flex;
+  flex-direction: column;
+}
+
+body.path-ctt-editor #main-wrapper,
+body.path-ctt-editor-process #main-wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Let the nested Drupal wrappers stretch within the flex column. */
+body.path-ctt-editor #main,
+body.path-ctt-editor-process #main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.path-ctt-editor main,
+body.path-ctt-editor-process main {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+body.path-ctt-editor main > .section,
+body.path-ctt-editor-process main > .section {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.path-ctt-editor footer.site-footer,
+body.path-ctt-editor-process footer.site-footer {
+  flex: 0 0 auto;
+}
+
+.path-ctt-editor .page-title,
+.path-ctt-editor-process .page-title {
+  display: none !important;
+}
+
+.path-ctt-editor main .container,
+.path-ctt-editor-process main .container,
+.path-ctt-editor .main-content .container,
+.path-ctt-editor-process .main-content .container,
+.path-ctt-editor #block-hasco-barrio-content,
+.path-ctt-editor-process #block-hasco-barrio-content,
+.path-ctt-editor article,
+.path-ctt-editor-process article {
+  max-width: 100% !important;
+  width: 100% !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+.path-ctt-editor #ctt-workflow-app,
+.path-ctt-editor-process #ctt-workflow-app {
+  position: relative;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.path-ctt-editor .ctt-loading-indicator,
+.path-ctt-editor-process .ctt-loading-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.path-ctt-editor .ctt-loading-content,
+.path-ctt-editor-process .ctt-loading-content {
+  text-align: center;
+}
+
+.path-ctt-editor .ctt-loading-text,
+.path-ctt-editor-process .ctt-loading-text {
+  margin-top: 1rem;
+  color: #666;
+}
+
+.path-ctt-editor .ctt-readonly-banner,
+.path-ctt-editor-process .ctt-readonly-banner {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 4px solid #8a6d00;
+  background: #fff8e1;
+  color: #5c4700;
+  font-size: 0.875rem;
+  line-height: 1.3;
+}
+
+.path-ctt-editor [data-ctt-readonly-preview="1"],
+.path-ctt-editor-process [data-ctt-readonly-preview="1"] {
+  filter: saturate(0.96);
+}

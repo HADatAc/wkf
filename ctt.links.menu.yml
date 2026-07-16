@@ -4,6 +4,38 @@ ctt.editor:
   parent: system.admin_structure
   weight: 10
 
+ctt.editor_create:
+  title: 'Create Structured Scenario'
+  route_name: ctt.editor_create
+  parent: system.admin_structure
+  weight: 11
+
+ctt.tools_repository:
+  title: 'Analytical Tools Repository'
+  route_name: ctt.tools_repository
+  parent: system.admin_structure
+  weight: 12
+
+ctt.r_analysis:
+  title: 'R Analysis Interface'
+  route_name: ctt.r_analysis
+  parent: system.admin_structure
+  weight: 13
+
+ctt.tools_repository_main:
+  title: 'Workflow Tools Repository'
+  route_name: ctt.tools_repository
+  parent: std.manage_top_level
+  menu_name: main
+  weight: 24
+
+ctt.r_analysis_main:
+  title: 'Workflow R Analysis'
+  route_name: ctt.r_analysis
+  parent: std.manage_top_level
+  menu_name: main
+  weight: 25
+
 ctt.settings:
   title: 'CTT Editor Settings'
   route_name: ctt.settings

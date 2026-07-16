@@ -1,5 +1,5 @@
 # ==========================================
-# CTT Workflow Editor — Routes
+# CTT Workflow Editor - Routes
 # ==========================================
 
 # --- Editor page (renders the React app) ---
@@ -11,6 +11,47 @@ ctt.editor:
   requirements:
     _permission: 'access ctt editor'
 
+# Creation entrypoint for structured workflows.
+ctt.editor_create:
+  path: '/ctt/workflow/create'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttEditorController::createEntry'
+    _title: 'Create Structured Scenario'
+  requirements:
+    _permission: 'create ctt workflow'
+
+ctt.tools_repository:
+  path: '/workflow/tools-repository'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttEditorController::toolsRepositoryPage'
+    _title: 'Analytical Tools Repository'
+  requirements:
+    _permission: 'submit ctt workflow'
+  options:
+    no_cache: TRUE
+
+ctt.r_analysis:
+  path: '/workflow/r-analysis'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttEditorController::rAnalysisPage'
+    _title: 'R Analysis Interface'
+  requirements:
+    _permission: 'submit ctt workflow'
+  options:
+    no_cache: TRUE
+
+# Unified submission entrypoint with study context.
+ctt.submission_entry:
+  path: '/ctt/submission/{studyuri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttEditorController::submissionEntry'
+    _title: 'Structured Scenario Submission'
+  requirements:
+    _permission: 'submit ctt workflow'
+    studyuri: '.+'
+  options:
+    no_cache: TRUE
+
 # Load editor with a specific process URI
 ctt.editor_process:
   path: '/ctt/editor/{process_uri}'
@@ -18,7 +59,7 @@ ctt.editor_process:
     _controller: '\Drupal\ctt\Controller\CttEditorController::editorPage'
     _title: 'CTT Workflow Editor'
   requirements:
-    _permission: 'access ctt editor'
+    _permission: 'edit ctt workflow'
 
 # --- Settings form ---
 ctt.settings:
@@ -42,7 +83,7 @@ ctt.api.process.list:
     no_cache: TRUE
 
 ctt.api.process.get:
-  path: '/workflow/api/process/{uri}'
+  path: '/workflow/api/process/get'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getProcess'
   requirements:
@@ -53,23 +94,91 @@ ctt.api.process.create:
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::createProcess'
   requirements:
-    _permission: 'access ctt editor'
+    _permission: 'create ctt workflow'
   methods: [POST]
 
+ctt.api.process.update:
+  path: '/workflow/api/process/{process_uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::updateProcess'
+  requirements:
+    _permission: 'edit ctt workflow'
+    process_uri: '.+'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
+
 ctt.api.process.delete:
-  path: '/workflow/api/process/delete/{uri}'
+  path: '/workflow/api/process/delete'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::deleteProcess'
   requirements:
-    _permission: 'access ctt editor'
+    _permission: 'edit ctt workflow'
   methods: [DELETE]
 
 ctt.api.process.tree:
-  path: '/workflow/api/process/tree/{uri}'
+  path: '/workflow/api/process/tree'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getProcessTree'
   requirements:
     _permission: 'access ctt editor'
+
+ctt.api.process.tasks:
+  path: '/workflow/api/process/{process_uri}/tasks'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcessTasks'
+  requirements:
+    _permission: 'access ctt editor'
+    process_uri: '.+'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+# Version history (local-only). The editor calls this with an encoded URI
+# that may contain decoded slashes under Apache, so allow any chars.
+ctt.api.process.versions.get:
+  path: '/workflow/api/process/{process_uri}/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcessVersions'
+  requirements:
+    _permission: 'access ctt editor'
+    process_uri: '.+'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.process.versions.create:
+  path: '/workflow/api/process/{process_uri}/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::createProcessVersion'
+  requirements:
+    _permission: 'edit ctt workflow'
+    process_uri: '.+'
+  methods: [POST]
+  options:
+    no_cache: TRUE
+
+# Query-param versions endpoint to avoid Apache rejecting encoded slashes.
+# Frontend should call: /workflow/api/process/versions?uri=...
+ctt.api.process.versions_query.get:
+  path: '/workflow/api/process/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getProcessVersionsQuery'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.process.versions_query.create:
+  path: '/workflow/api/process/versions'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::createProcessVersionQuery'
+  requirements:
+    _permission: 'edit ctt workflow'
+  methods: [POST]
+  options:
+    no_cache: TRUE
 
 # Task CRUD
 ctt.api.task.list:
@@ -82,7 +191,7 @@ ctt.api.task.list:
     no_cache: TRUE
 
 ctt.api.task.get:
-  path: '/workflow/api/task/{uri}'
+  path: '/workflow/api/task/get'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getTask'
   requirements:
@@ -93,16 +202,60 @@ ctt.api.task.create:
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::createTask'
   requirements:
-    _permission: 'access ctt editor'
+    _permission: 'edit ctt workflow'
   methods: [POST]
 
+ctt.api.task.update:
+  path: '/workflow/api/task/{task_uri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::updateTask'
+  requirements:
+    _permission: 'edit ctt workflow'
+    task_uri: '.+'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
+
+ctt.api.task.children:
+  path: '/workflow/api/task/{task_uri}/children'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getTaskChildren'
+  requirements:
+    _permission: 'access ctt editor'
+    task_uri: '.+'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.task.dependency:
+  path: '/workflow/api/task/{task_uri}/dependency'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::setTaskDependency'
+  requirements:
+    _permission: 'edit ctt workflow'
+    task_uri: '.+'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
+
 ctt.api.task.delete:
-  path: '/workflow/api/task/delete/{uri}'
+  path: '/workflow/api/task/delete'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::deleteTask'
   requirements:
-    _permission: 'access ctt editor'
+    _permission: 'edit ctt workflow'
   methods: [DELETE]
+
+# Assign required instruments to a task (query param to avoid encoded-slash routing issues).
+ctt.api.task.instruments_query:
+  path: '/workflow/api/task/instruments'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::setTaskRequiredInstrumentsQuery'
+  requirements:
+    _permission: 'edit ctt workflow'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
 
 # Instrument routes
 ctt.api.instrument.list:
@@ -115,18 +268,36 @@ ctt.api.instrument.list:
     no_cache: TRUE
 
 ctt.api.instrument.get:
-  path: '/workflow/api/instrument/{uri}'
+  path: '/workflow/api/instrument/get'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getInstrument'
   requirements:
     _permission: 'access ctt editor'
 
 ctt.api.instrument.components:
-  path: '/workflow/api/instrument/{uri}/components'
+  path: '/workflow/api/instrument/components'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentComponents'
   requirements:
     _permission: 'access ctt editor'
+
+# Prefer query param for URIs to avoid encoded-slash routing issues on Apache.
+ctt.api.instrument.containerslots_query:
+  path: '/workflow/api/instrument/containerslots'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentContainerSlotsQuery'
+  requirements:
+    _permission: 'access ctt editor'
+  options:
+    no_cache: TRUE
+
+ctt.api.instrument.containerslots:
+  path: '/workflow/api/instrument/{instrument_uri}/containerslots'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getInstrumentContainerSlots'
+  requirements:
+    _permission: 'access ctt editor'
+    instrument_uri: '.+'
 
 # Instrument search autocomplete
 ctt.api.instrument.search:
@@ -152,12 +323,166 @@ ctt.api.repo:
   requirements:
     _permission: 'access ctt editor'
 
+ctt.api.repo.languages:
+  path: '/workflow/api/repo/languages'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getRepoLanguages'
+  requirements:
+    _permission: 'access ctt editor'
+
+ctt.api.repo.analytical_tools:
+  path: '/workflow/api/repo/analytical-tools'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::analyticalToolsRepository'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET, POST]
+  options:
+    no_cache: TRUE
+
+ctt.api.r_analysis.execute:
+  path: '/workflow/api/r-analysis/execute'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::executeRAnalysis'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET, POST]
+  options:
+    no_cache: TRUE
+
+ctt.api.r_analysis.study_autocomplete:
+  path: '/workflow/api/r-analysis/autocomplete/study'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::rAnalysisStudyAutocomplete'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.r_analysis.process_autocomplete:
+  path: '/workflow/api/r-analysis/autocomplete/process'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::rAnalysisProcessAutocomplete'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.submission.validate:
+  path: '/workflow/api/submission/validate'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::validateSubmission'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET, POST]
+  options:
+    no_cache: TRUE
+
+ctt.api.submission.associations:
+  path: '/workflow/api/submission/associations'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::submissionAssociations'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET, POST]
+  options:
+    no_cache: TRUE
+
+ctt.api.submission.status:
+  path: '/workflow/api/submission/status'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::submissionStatus'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET, POST]
+  options:
+    no_cache: TRUE
+
+# Generic hascoapi proxy (same-origin) for any direct frontend calls.
+ctt.api.hasco_proxy:
+  path: '/workflow/hascoapi/api/{proxy_path}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::proxyHasco'
+  requirements:
+    _permission: 'access ctt editor'
+    proxy_path: '.+'
+  methods: [GET, POST, PUT, PATCH, DELETE]
+  options:
+    no_cache: TRUE
+
+# --- Simple execution simulation (creates DA/DataFile stub) ---
+ctt.execution_simulate:
+  path: '/ctt/execution/simulate/{studyuri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttExecutionController::simulateExecution'
+    _title: 'Create Execution'
+  requirements:
+    _permission: 'access content'
+  options:
+    no_cache: TRUE
+
+ctt.execution_create:
+  path: '/ctt/execution/create/{studyuri}'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttExecutionController::createExecution'
+    _title: 'Create Execution'
+  requirements:
+    _permission: 'submit ctt workflow'
+  options:
+    no_cache: TRUE
+
+ctt.execution_save:
+  path: '/ctt/execution/save'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttExecutionController::saveRunToDaFile'
+    _title: 'Save Execution Output'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [POST]
+  options:
+    no_cache: TRUE
+
+ctt.execution_download:
+  path: '/ctt/execution/download'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttExecutionController::downloadDaFile'
+    _title: 'Download Execution Output'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+# Query-param variant to support multi-segment proxy paths on Apache/Windows.
+# Usage: /workflow/hascoapi/api?path=slots/bycodebook/{encodedUri}/50/0
+ctt.api.hasco_proxy_query:
+  path: '/workflow/hascoapi/api'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::proxyHasco'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [GET, POST, PUT, PATCH, DELETE]
+  options:
+    no_cache: TRUE
+
+# Debug: inspect Drupal-local overrides for task instrument selections.
+ctt.api.debug.task_instruments:
+  path: '/workflow/api/debug/task-instruments'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::debugTaskInstruments'
+  requirements:
+    _permission: 'administer ctt'
+  options:
+    no_cache: TRUE
+
 # --- Standalone authentication (CTT dev server → Drupal) ---
 # Validates credentials against Drupal's user DB and returns user identity.
 ctt.auth.login:
   path: '/workflow/auth/login'
   defaults:
-    _controller: 'ctt.auth_controller:login'
+    _controller: '\Drupal\ctt\Controller\CttAuthController::login'
   requirements:
     _access: 'TRUE'
   methods: [POST]

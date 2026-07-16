@@ -2,21 +2,30 @@
 
 namespace Drupal\ctt\Controller;
 
+use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
-use Drupal\user\UserAuthInterface;
 use Drupal\user\UserInterface;
+use Drupal\user\UserAuthInterface;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
  * Authentication endpoints for the CTT standalone UI.
  */
-final class CttAuthController {
+final class CttAuthController implements ContainerInjectionInterface {
 
   public function __construct(
     private readonly UserAuthInterface $userAuth,
     private readonly EntityTypeManagerInterface $entityTypeManager,
   ) {}
+
+  public static function create(ContainerInterface $container): static {
+    return new static(
+      $container->get('user.auth'),
+      $container->get('entity_type.manager'),
+    );
+  }
 
   /**
    * Logs in a user by validating credentials against Drupal.

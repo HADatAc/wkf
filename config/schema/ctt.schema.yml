@@ -2,12 +2,15 @@ ctt.settings:
   type: config_object
   label: 'CTT Editor settings'
   mapping:
-    hasco_api_url:
-      type: string
-      label: 'HASCO API URL'
     jwt_key_id:
       type: string
       label: 'JWT Key ID'
     disable_ssl_verification:
       type: boolean
       label: 'Disable SSL verification'
+    r_analysis_endpoint_path:
+      type: string
+      label: 'R analysis endpoint path'
+    r_analysis_timeout_seconds:
+      type: integer
+      label: 'R analysis timeout in seconds'

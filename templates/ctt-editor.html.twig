@@ -1,11 +1,203 @@
 {# CTT Workflow Editor Twig template #}
-<div id="ctt-workflow-app" class="ctt-editor-container" style="min-height: 85vh; position: relative;">
-  <div class="ctt-loading-indicator" style="display: flex; align-items: center; justify-content: center; height: 60vh;">
-    <div style="text-align: center;">
+<div id="ctt-workflow-app" class="ctt-editor-container">
+  <div class="ctt-loading-indicator">
+    <div class="ctt-loading-content">
       <div class="ajax-progress ajax-progress-throbber">
         <div class="throbber">&nbsp;</div>
       </div>
-      <p style="margin-top: 1rem; color: #666;">Loading CTT Workflow Editor…</p>
+      <p class="ctt-loading-text">Loading CTT Workflow Editor…</p>
     </div>
   </div>
 </div>
+<script>
+  (function () {
+    var container = document.getElementById('ctt-workflow-app');
+    if (!container || container.getAttribute('data-ctt-inline-timeout-guard') === '1') {
+      return;
+    }
+
+    container.setAttribute('data-ctt-inline-timeout-guard', '1');
+    var requestedTimeout = 10000;
+    try {
+      if (window.drupalSettings && drupalSettings.ctt && drupalSettings.ctt.connectionTimeoutMs) {
+        requestedTimeout = parseInt(drupalSettings.ctt.connectionTimeoutMs, 10);
+      }
+    }
+    catch (e) {
+      requestedTimeout = 10000;
+    }
+
+    var timeoutMs = (!isNaN(requestedTimeout) && requestedTimeout >= 5000)
+      ? requestedTimeout
+      : 10000;
+    var startedAt = Date.now();
+    var resolved = false;
+    var timeoutTriggered = false;
+    var maxGuardLifetimeMs = 60000;
+
+    function htmlEscape(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function getCombinedText() {
+      var containerText = String(container.textContent || '');
+      var bodyText = '';
+      if (document.body) {
+        if (typeof document.body.innerText === 'string' && document.body.innerText.trim() !== '') {
+          bodyText = String(document.body.innerText);
+        }
+        else {
+          bodyText = String(document.body.textContent || '');
+        }
+      }
+      return (containerText + ' ' + bodyText).replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
+    function looksStuckConnecting() {
+      var text = getCombinedText();
+      return text.indexOf('connecting to api') !== -1;
+    }
+
+    function looksLoadedSurface() {
+      var text = String(container.innerText || container.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+      if (text.indexOf('connecting to api') !== -1) {
+        return false;
+      }
+
+      if (text.indexOf('loading ctt workflow editor') !== -1) {
+        return false;
+      }
+
+      var nodeCount = container.querySelectorAll ? container.querySelectorAll('*').length : 0;
+      if (nodeCount >= 10) {
+        return true;
+      }
+
+      return text.length >= 80;
+    }
+
+    function getOrCreateTimeoutBanner() {
+      var banner = document.getElementById('ctt-inline-timeout-banner');
+      if (banner) {
+        return banner;
+      }
+
+      banner = document.createElement('div');
+      banner.id = 'ctt-inline-timeout-banner';
+      banner.className = 'ctt-api-timeout-wrapper';
+
+      if (container.parentNode) {
+        container.parentNode.insertBefore(banner, container);
+      }
+      else if (document.body) {
+        document.body.insertBefore(banner, document.body.firstChild);
+      }
+
+      return banner;
+    }
+
+    function enforceTimeoutState() {
+      if (!timeoutTriggered) {
+        return;
+      }
+
+      if (container.style.display !== 'none') {
+        container.style.display = 'none';
+      }
+      if (container.getAttribute('aria-hidden') !== 'true') {
+        container.setAttribute('aria-hidden', 'true');
+      }
+    }
+
+    function renderTimeoutFallback() {
+      if (timeoutTriggered) {
+        enforceTimeoutState();
+        return;
+      }
+
+      var elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      var processUri = '';
+      try {
+        if (window.drupalSettings && drupalSettings.ctt && drupalSettings.ctt.processUri) {
+          processUri = String(drupalSettings.ctt.processUri);
+        }
+      }
+      catch (e) {
+        processUri = '';
+      }
+
+      var banner = getOrCreateTimeoutBanner();
+      banner.innerHTML = ''
+        + '<div class="alert alert-warning ctt-api-timeout" role="alert" style="margin:12px;">'
+        + '<h4 class="alert-heading" style="margin-top:0;">API connection timeout</h4>'
+        + '<p style="margin-bottom:8px;">The editor stayed in Connecting to API for ' + elapsed + 's and was interrupted to avoid an infinite loop.</p>'
+        + '<p style="margin-bottom:12px;"><small>Process URI: ' + htmlEscape(processUri || 'n/a') + '</small></p>'
+        + '<button type="button" class="btn btn-primary btn-sm" data-ctt-retry-inline="1">Retry connection</button>'
+        + '</div>';
+
+      var retry = banner.querySelector('[data-ctt-retry-inline="1"]');
+      if (retry) {
+        retry.addEventListener('click', function () {
+          window.location.reload();
+        });
+      }
+
+      timeoutTriggered = true;
+      enforceTimeoutState();
+      resolved = true;
+    }
+
+    function evaluate() {
+      if (resolved) {
+        return;
+      }
+
+      var elapsed = Date.now() - startedAt;
+      if (elapsed < timeoutMs) {
+        return;
+      }
+
+      if (looksStuckConnecting()) {
+        renderTimeoutFallback();
+        return;
+      }
+
+      if (looksLoadedSurface()) {
+        resolved = true;
+        return;
+      }
+
+      // Keep checking for a short grace window in case the connecting
+      // message is rendered asynchronously after initial timeout.
+      if (elapsed >= (timeoutMs + 3000)) {
+        renderTimeoutFallback();
+      }
+    }
+
+    var intervalId = window.setInterval(function () {
+      if (resolved) {
+        clearInterval(intervalId);
+        return;
+      }
+
+      if ((Date.now() - startedAt) > maxGuardLifetimeMs) {
+        clearInterval(intervalId);
+        return;
+      }
+
+      evaluate();
+      enforceTimeoutState();
+    }, 500);
+
+    window.setTimeout(evaluate, timeoutMs + 100);
+  })();
+</script>
