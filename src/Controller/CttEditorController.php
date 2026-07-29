@@ -6,6 +6,7 @@ use Drupal\Core\Controller\ControllerBase;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Session\AccountProxyInterface;
+use Drupal\Core\Url;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Drupal\Component\Utility\Html;
 use Drupal\Core\Render\Markup;
@@ -17,6 +18,47 @@ use Drupal\Core\Render\Markup;
  * configuration via drupalSettings.ctt.
  */
 class CttEditorController extends ControllerBase {
+
+  /**
+   * Resolve a human-readable label for a URI from available APIs.
+   */
+  protected function resolveLabelByUri(?string $uri): string {
+    $normalized = trim((string) $uri);
+    if ($normalized === '') {
+      return '';
+    }
+
+    if (\Drupal::hasService('rep.api_connector')) {
+      try {
+        $api = \Drupal::service('rep.api_connector');
+        $obj = $api->parseObjectResponse($api->getUri($normalized), 'getUri');
+        if (is_object($obj)) {
+          $label = trim((string) ($obj->label ?? $obj->title ?? $obj->name ?? ''));
+          if ($label !== '') {
+            return $label;
+          }
+        }
+      }
+      catch (\Throwable $ignored) {
+      }
+    }
+
+    if (\Drupal::hasService('ctt.hasco_client')) {
+      try {
+        $probe = \Drupal::service('ctt.hasco_client')->getByUri($normalized);
+        if (is_array($probe) && empty($probe['error'])) {
+          $label = trim((string) ($probe['label'] ?? $probe['title'] ?? $probe['name'] ?? ''));
+          if ($label !== '') {
+            return $label;
+          }
+        }
+      }
+      catch (\Throwable $ignored) {
+      }
+    }
+
+    return '';
+  }
 
   /**
    * Persist study workflow association in both latest and historical keys.
@@ -832,11 +874,32 @@ class CttEditorController extends ControllerBase {
       ],
     ];
 
+    $scenarioLabel = $this->resolveLabelByUri($study_uri);
+    $processLabel = $this->resolveLabelByUri($resolvedProcessUri);
+
+    $backToEditProcessBasedStudyUrl = '';
+    if (!empty($study_uri)) {
+      $backToEditProcessBasedStudyUrl = Url::fromRoute('std.edit_processbasedstudy', [
+        'studyuri' => rawurlencode(base64_encode((string) $study_uri)),
+      ])->toString();
+    }
+
+    $editorContext = [
+      'scenarioLabel' => $scenarioLabel,
+      'scenarioUri' => (string) ($study_uri ?? ''),
+      'processLabel' => $processLabel,
+      'processUri' => (string) ($resolvedProcessUri ?? ''),
+      'backToEditProcessBasedStudyUrl' => $backToEditProcessBasedStudyUrl,
+    ];
+
+    $drupal_settings['editorContext'] = $editorContext;
+
     return [
       '#theme' => 'ctt_editor',
       '#title' => '',
       '#process_uri' => $process_uri,
       '#api_settings' => $drupal_settings,
+      '#editor_context' => $editorContext,
       '#attached' => [
         'library' => [
           'ctt/ctt-editor-init',

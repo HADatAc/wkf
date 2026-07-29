@@ -1,4 +1,24 @@
 {# CTT Workflow Editor Twig template #}
+{% set scenario_label = editor_context.scenarioLabel|default('') %}
+{% set scenario_uri = editor_context.scenarioUri|default('') %}
+{% set process_label = editor_context.processLabel|default('') %}
+{% set process_uri = editor_context.processUri|default('') %}
+{% set back_url = editor_context.backToEditProcessBasedStudyUrl|default('') %}
+
+{% if scenario_label or process_label %}
+  <div class="ctt-editor-context-header card mb-3">
+    <div class="card-body py-2">
+      <h3 class="mb-1">Editing {{ scenario_label ?: 'Scenario' }} / {{ process_label ?: 'Process' }}</h3>
+      {% if scenario_uri %}
+        <p class="mb-1 small text-muted"><strong>Scenario URI:</strong> {{ scenario_uri }}</p>
+      {% endif %}
+      {% if process_uri %}
+        <p class="mb-0 small text-muted"><strong>Process URI:</strong> {{ process_uri }}</p>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+
 <div id="ctt-workflow-app" class="ctt-editor-container">
   <div class="ctt-loading-indicator">
     <div class="ctt-loading-content">
@@ -9,6 +29,13 @@
     </div>
   </div>
 </div>
+
+{% if back_url %}
+  <div class="ctt-editor-back-wrapper mt-3 mb-2">
+    <a href="{{ back_url }}" class="btn btn-outline-secondary">Back to Edit Process-Based Study</a>
+  </div>
+{% endif %}
+
 <script>
   (function () {
     var container = document.getElementById('ctt-workflow-app');
