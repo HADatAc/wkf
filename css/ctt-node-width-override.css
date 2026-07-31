@@ -1,0 +1,16 @@
+/* Force wider task nodes for all CTT React Flow canvases. */
+.react-flow .react-flow__node-default,
+.react-flow .react-flow__node,
+.react-flow__node-default,
+.react-flow__node {
+  width: 640px !important;
+  max-width: 640px !important;
+}
+
+.react-flow .react-flow__node-default .task-node,
+.react-flow .react-flow__node .task-node,
+.react-flow__node-default .task-node,
+.react-flow__node .task-node {
+  width: 100% !important;
+  max-width: none !important;
+}

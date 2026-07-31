@@ -1,0 +1,32 @@
+/*
+ * Force wider task nodes in the React Flow canvas.
+ * Targets the mounted editor container directly so it works in
+ * both /ctt/editor and embedded Edit Scenario pages.
+ */
+#ctt-workflow-app .react-flow__node.react-flow__node-default,
+#ctt-workflow-app .react-flow__node-default,
+#ctt-workflow-app .react-flow__node.react-flow__node-input,
+#ctt-workflow-app .react-flow__node.react-flow__node-output,
+#ctt-workflow-app .react-flow__node.react-flow__node-group {
+  width: 640px !important;
+  min-width: 640px !important;
+  max-width: 640px !important;
+}
+
+#ctt-workflow-app .react-flow__node-default .task-node,
+#ctt-workflow-app .react-flow__node .task-node {
+  width: 100% !important;
+  max-width: none !important;
+}
+
+/* Hide edge/relationship text labels; keep dependency semantics in task cards only. */
+#ctt-workflow-app .react-flow__edge-textwrapper,
+#ctt-workflow-app .react-flow__edge-text,
+#ctt-workflow-app .react-flow__edge-textbg {
+  display: none !important;
+}
+
+/* Also hide custom clickable edge-operator badges like ">>" rendered via title attribute. */
+#ctt-workflow-app [title="Double-click to change operator"] {
+  display: none !important;
+}

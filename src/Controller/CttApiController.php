@@ -439,6 +439,100 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Normalize manager-email-like values for statistics refresh filters.
+   */
+  protected function normalizeManagerEmailForStatistics(string $value): string {
+    $email = strtolower(trim($value));
+    if ($email === '') {
+      return '';
+    }
+
+    if (strpos($email, 'mailto:') === 0) {
+      $email = substr($email, 7);
+    }
+
+    if (preg_match('/(?:^|[?&])manageremail=([^&\s]+)/i', $email, $m)) {
+      $email = trim((string) $m[1]);
+    }
+
+    $qPos = strpos($email, '?');
+    if ($qPos !== FALSE) {
+      $email = substr($email, 0, $qPos);
+    }
+
+    if (preg_match('/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i', $email, $m)) {
+      return strtolower(trim((string) $m[0]));
+    }
+
+    return '';
+  }
+
+  /**
+   * Fire-and-forget refresh for PMSR members statistics by manager email.
+   */
+  protected function triggerPmsrMembersStatisticsRefreshByManagerEmail(?string $managerEmail): void {
+    if (!\Drupal::moduleHandler()->moduleExists('pmsr')) {
+      return;
+    }
+
+    $normalized = $this->normalizeManagerEmailForStatistics((string) $managerEmail);
+    if ($normalized === '') {
+      return;
+    }
+
+    $baseUrl = \Drupal::request()->getSchemeAndHttpHost();
+    $url = rtrim($baseUrl, '/') . '/pmsr/api/statistics/refresh/members?manager_email=' . rawurlencode($normalized);
+
+    try {
+      $response = \Drupal::httpClient()->request('POST', $url, [
+        'timeout' => 25,
+        'connect_timeout' => 2,
+        'http_errors' => FALSE,
+      ]);
+
+      $status = (int) $response->getStatusCode();
+      $body = (string) $response->getBody();
+      $decoded = json_decode($body, TRUE);
+      $ok = ($status >= 200 && $status < 300) && (!is_array($decoded) || !array_key_exists('success', $decoded) || !empty($decoded['success']));
+
+      // Fallback to full members refresh when scoped refresh fails.
+      if (!$ok) {
+        $fallbackUrl = rtrim($baseUrl, '/') . '/pmsr/api/statistics/refresh/members';
+        \Drupal::httpClient()->request('POST', $fallbackUrl, [
+          'timeout' => 30,
+          'connect_timeout' => 2,
+          'http_errors' => FALSE,
+        ]);
+      }
+    }
+    catch (\Throwable $e) {
+      \Drupal::logger('ctt')->notice('Could not trigger PMSR members statistics refresh: @message', [
+        '@message' => $e->getMessage(),
+      ]);
+    }
+  }
+
+  /**
+   * Trigger PMSR members statistics refresh for a process-related mutation.
+   */
+  protected function triggerPmsrMembersStatisticsRefreshForProcess(string $processUri, ?string $ownerHint = NULL): void {
+    $ownerEmail = '';
+    if ($this->isUri($processUri)) {
+      $ownerEmail = $this->resolveProcessOwnerEmail($processUri);
+    }
+
+    if ($ownerEmail === '' && is_string($ownerHint) && trim($ownerHint) !== '') {
+      $ownerEmail = trim($ownerHint);
+    }
+
+    if ($ownerEmail === '') {
+      $ownerEmail = $this->getCurrentUserEmail();
+    }
+
+    $this->triggerPmsrMembersStatisticsRefreshByManagerEmail($ownerEmail);
+  }
+
+  /**
    * Resolve and cache study owner/manager email for ownership checks.
    */
   protected function resolveStudyOwnerEmail(string $studyUri): string {
@@ -463,10 +557,10 @@ class CttApiController extends ControllerBase {
 
       $ownerEmail = '';
       if (is_object($studyObj)) {
-        $ownerEmail = trim((string) ($studyObj->hasSIRManagerEmail ?? $studyObj->managerEmail ?? ''));
+        $ownerEmail = $this->normalizeEmailCandidate((string) ($studyObj->hasSIRManagerEmail ?? $studyObj->managerEmail ?? ''));
       }
       elseif (is_array($studyObj)) {
-        $ownerEmail = trim((string) ($studyObj['hasSIRManagerEmail'] ?? $studyObj['managerEmail'] ?? ''));
+        $ownerEmail = $this->normalizeEmailCandidate((string) ($studyObj['hasSIRManagerEmail'] ?? $studyObj['managerEmail'] ?? ''));
       }
 
       if ($ownerEmail !== '') {
@@ -538,7 +632,30 @@ class CttApiController extends ControllerBase {
     if ($normalized === '') {
       return '';
     }
-    return $normalized;
+
+    // Accept values like "Name <user@example.org>".
+    if (preg_match('/<([^>]+)>/', $normalized, $matches) && isset($matches[1])) {
+      $normalized = trim((string) $matches[1]);
+    }
+
+    $lower = strtolower($normalized);
+    if (strpos($lower, 'mailto:') === 0) {
+      $normalized = trim(substr($normalized, 7));
+    }
+
+    // Remove query-string contamination such as
+    // "user@example.org?manageremail=user@example.org".
+    $queryPos = strpos($normalized, '?');
+    if ($queryPos !== FALSE) {
+      $normalized = trim(substr($normalized, 0, $queryPos));
+    }
+
+    $ampPos = strpos($normalized, '&');
+    if ($ampPos !== FALSE) {
+      $normalized = trim(substr($normalized, 0, $ampPos));
+    }
+
+    return filter_var($normalized, FILTER_VALIDATE_EMAIL) ? $normalized : '';
   }
 
   /**
@@ -2322,6 +2439,12 @@ class CttApiController extends ControllerBase {
         if ($ownerIdentifier !== '') {
           $this->cacheProcessOwnerIdentifier($createdProcessUri, $ownerIdentifier);
         }
+
+        $this->triggerPmsrMembersStatisticsRefreshForProcess($createdProcessUri, $ownerIdentifier);
+      }
+      else {
+        $ownerIdentifier = trim((string) ($data['hasSIRManagerEmail'] ?? $currentOwnerIdentifier));
+        $this->triggerPmsrMembersStatisticsRefreshByManagerEmail($ownerIdentifier);
       }
 
       return new JsonResponse($result, 201);
@@ -2343,12 +2466,15 @@ class CttApiController extends ControllerBase {
         $uri = $resolvedUri;
       }
 
+      $ownerIdentifier = $this->resolveProcessOwnerEmail((string) $uri);
+
       $ownerGuard = $this->enforceProcessOwnerForMutation((string) $uri);
       if ($ownerGuard instanceof JsonResponse) {
         return $ownerGuard;
       }
 
       $this->hascoClient->deleteElement('process', $uri);
+      $this->triggerPmsrMembersStatisticsRefreshForProcess((string) $uri, $ownerIdentifier);
       return new JsonResponse(['status' => 'deleted']);
     }
     catch (\Exception $e) {
@@ -2895,6 +3021,8 @@ class CttApiController extends ControllerBase {
         $this->cacheTaskProcessUri($createdTaskUri, $taskProcessUri);
       }
 
+      $this->triggerPmsrMembersStatisticsRefreshForProcess($taskProcessUri, $this->getCurrentUserEmail());
+
       return new JsonResponse($result, 201);
     }
     catch (\Exception $e) {
@@ -2914,7 +3042,10 @@ class CttApiController extends ControllerBase {
         return $ownerGuard;
       }
 
+      $taskProcessUri = $this->resolveTaskProcessUri((string) $uri);
+
       $this->hascoClient->deleteElement('task', $uri);
+      $this->triggerPmsrMembersStatisticsRefreshForProcess($taskProcessUri, $this->getCurrentUserEmail());
       return new JsonResponse(['status' => 'deleted']);
     }
     catch (\Exception $e) {

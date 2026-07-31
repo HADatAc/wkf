@@ -123,3 +123,19 @@ body.path-ctt-editor-process footer.site-footer {
 .path-ctt-editor-process [data-ctt-readonly-preview="1"] {
   filter: saturate(0.96);
 }
+
+/* Canvas task nodes: double width for better readability. */
+.path-ctt-editor .react-flow__node-default,
+.path-ctt-editor-process .react-flow__node-default,
+.path-ctt-editor .react-flow__node-cttNode,
+.path-ctt-editor-process .react-flow__node-cttNode {
+  width: 640px !important;
+  max-width: 640px !important;
+}
+
+.path-ctt-editor .react-flow__node-default .task-node,
+.path-ctt-editor-process .react-flow__node-default .task-node,
+.path-ctt-editor .react-flow__node-cttNode .task-node,
+.path-ctt-editor-process .react-flow__node-cttNode .task-node {
+  width: 100%;
+}
