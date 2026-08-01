@@ -6,3 +6,9 @@ services:
       - '@config.factory'
       - '@key.repository'
       - '@logger.factory'
+
+  ctt.workflow_layout_exporter:
+    class: Drupal\ctt\Service\WorkflowLayoutExporter
+    arguments:
+      - '@ctt.hasco_client'
+      - '@logger.factory'

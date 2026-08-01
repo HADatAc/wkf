@@ -8,6 +8,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Drupal\ctt\Service\CttHascoClient;
+use Drupal\ctt\Service\WorkflowLayoutExporter;
 use Drupal\rep\Utils;
 
 /**
@@ -25,11 +26,17 @@ class CttApiController extends ControllerBase {
   protected $hascoClient;
 
   /**
+   * @var \Drupal\ctt\Service\WorkflowLayoutExporter
+   */
+  protected $workflowLayoutExporter;
+
+  /**
    * {@inheritdoc}
    */
   public static function create(ContainerInterface $container) {
     $instance = new static();
     $instance->hascoClient = $container->get('ctt.hasco_client');
+    $instance->workflowLayoutExporter = $container->get('ctt.workflow_layout_exporter');
     return $instance;
   }
 
@@ -2315,6 +2322,25 @@ class CttApiController extends ControllerBase {
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
+      return new JsonResponse(['error' => $e->getMessage()], 500);
+    }
+  }
+
+  /**
+   * GET /workflow/api/process/export-layout?uri=...
+   */
+  public function exportProcessLayout(Request $request): JsonResponse {
+    try {
+      $uri = $this->decodeRouteEntityUri((string) $request->query->get('uri', ''));
+      if (!$this->isUri($uri)) {
+        return new JsonResponse(['error' => 'Missing or invalid process URI.'], 400);
+      }
+
+      $result = $this->workflowLayoutExporter->exportProcessLayout($uri);
+      $status = !empty($result['isSuccessful']) ? 200 : 422;
+      return new JsonResponse($result, $status);
+    }
+    catch (\Throwable $e) {
       return new JsonResponse(['error' => $e->getMessage()], 500);
     }
   }

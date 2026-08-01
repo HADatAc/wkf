@@ -134,6 +134,16 @@ ctt.api.process.tasks:
   options:
     no_cache: TRUE
 
+ctt.api.process.export_layout:
+  path: '/workflow/api/process/export-layout'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::exportProcessLayout'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
 # Version history (local-only). The editor calls this with an encoded URI
 # that may contain decoded slashes under Apache, so allow any chars.
 ctt.api.process.versions.get:
