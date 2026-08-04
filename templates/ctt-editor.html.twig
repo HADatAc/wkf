@@ -4,11 +4,14 @@
 {% set process_label = editor_context.processLabel|default('') %}
 {% set process_uri = editor_context.processUri|default('') %}
 {% set back_url = editor_context.backToEditProcessBasedStudyUrl|default('') %}
+{% set ctt_mode = api_settings.mode|default('edit') %}
+{% set special_execution_enabled = api_settings.specialExecution.enabled|default(false) %}
+{% set is_execution_view = (ctt_mode == 'execution') or special_execution_enabled %}
 
 {% if scenario_label or process_label %}
   <div class="ctt-editor-context-header card mb-3">
     <div class="card-body py-2">
-      <h3 class="mb-1">Editing {{ scenario_label ?: 'Scenario' }} / {{ process_label ?: 'Process' }}</h3>
+      <h3 class="mb-1">{{ is_execution_view ? 'Executing' : 'Editing' }} {{ scenario_label ?: 'Scenario' }} / {{ process_label ?: 'Process' }}</h3>
       {% if scenario_uri %}
         <p class="mb-1 small text-muted"><strong>Scenario URI:</strong> {{ scenario_uri }}</p>
       {% endif %}
@@ -18,6 +21,8 @@
     </div>
   </div>
 {% endif %}
+
+<div id="ctt-execution-interaction-host" class="ctt-execution-interaction-host" aria-live="polite"></div>
 
 <div id="ctt-workflow-app" class="ctt-editor-container">
   <div class="ctt-loading-indicator">
@@ -32,7 +37,7 @@
 
 {% if back_url %}
   <div class="ctt-editor-back-wrapper mt-3 mb-2">
-    <a href="{{ back_url }}" class="btn btn-outline-secondary">Back to Edit Process-Based Study</a>
+    <a href="{{ back_url }}" class="btn btn-outline-secondary">{{ is_execution_view ? 'Back to Manage Scenario Elements' : 'Back to Edit Process-Based Study' }}</a>
   </div>
 {% endif %}
 
@@ -226,129 +231,5 @@
     }, 500);
 
     window.setTimeout(evaluate, timeoutMs + 100);
-  })();
-</script>
-
-{# Study Metadata Panel - Process-Based Study Integration (Phase 3) #}
-<div id="ctt-study-metadata-panel" class="ctt-study-metadata-panel" style="margin-top: 20px; display: none;">
-  <div class="card">
-    <div class="card-header">
-      <h5 class="mb-0">
-        <button class="btn btn-link" type="button" data-toggle="collapse" data-target="#studyMetadataCollapse" aria-expanded="false" aria-controls="studyMetadataCollapse">
-          <i class="fa fa-flask"></i> Study Metadata (Optional)
-        </button>
-        <button id="manage-study-properties-btn" class="btn btn-sm btn-secondary float-right" type="button">
-          <i class="fa fa-edit"></i> Manage Study Properties
-        </button>
-      </h5>
-    </div>
-    
-    <div id="studyMetadataCollapse" class="collapse">
-      <div class="card-body">
-        <p class="text-muted small">
-          These fields are optional. If left empty, they will be auto-generated when the workflow is saved.
-        </p>
-        
-        <div class="form-group">
-          <label for="ctt-study-title">Study Title</label>
-          <input type="text" id="ctt-study-title" class="form-control" placeholder="Defaults to workflow label">
-          <small class="form-text text-muted">Full title of the study</small>
-        </div>
-        
-        <div class="form-group">
-          <label for="ctt-study-id">Study ID</label>
-          <input type="text" id="ctt-study-id" class="form-control" placeholder="Auto-generated (STD-XXX)">
-          <small class="form-text text-muted">Must start with "STD-". Leave empty to auto-generate from workflow ID.</small>
-        </div>
-        
-        <div class="form-group">
-          <label for="ctt-institution">Institution</label>
-          <input type="text" id="ctt-institution" class="form-control" placeholder="Defaults to your organization">
-          <small class="form-text text-muted">Institution conducting the study</small>
-        </div>
-        
-        <div class="form-group">
-          <label for="ctt-pi">Principal Investigator</label>
-          <input type="text" id="ctt-pi" class="form-control" placeholder="Defaults to workflow creator">
-          <small class="form-text text-muted">Lead researcher</small>
-        </div>
-        
-        <div class="form-group">
-          <label for="ctt-contact-email">Contact Email</label>
-          <input type="email" id="ctt-contact-email" class="form-control" placeholder="Defaults to your email">
-          <small class="form-text text-muted">Contact email for study inquiries</small>
-        </div>
-        
-        <div class="row">
-          <div class="col-md-6">
-            <div class="form-group">
-              <label for="ctt-start-date">Start Date</label>
-              <input type="date" id="ctt-start-date" class="form-control">
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="form-group">
-              <label for="ctt-end-date">End Date</label>
-              <input type="date" id="ctt-end-date" class="form-control">
-            </div>
-          </div>
-        </div>
-        
-        <div class="alert alert-info">
-          <i class="fa fa-info-circle"></i> 
-          <strong>Advanced Properties:</strong> Click "Manage Study Properties" above to edit specific aims, significance, and other advanced study metadata.
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-  (function() {
-    // Show study metadata panel after CTT editor loads
-    function initStudyMetadataPanel() {
-      var panel = document.getElementById('ctt-study-metadata-panel');
-      if (panel) {
-        panel.style.display = 'block';
-      }
-      
-      // Handle "Manage Study Properties" button
-      var manageBtn = document.getElementById('manage-study-properties-btn');
-      if (manageBtn) {
-        manageBtn.addEventListener('click', function() {
-          // Get current workflow/process URI from drupalSettings
-          var processUri = '';
-          try {
-            if (window.drupalSettings && drupalSettings.ctt && drupalSettings.ctt.processUri) {
-              processUri = drupalSettings.ctt.processUri;
-            }
-          } catch (e) {
-            console.error('Could not get process URI', e);
-          }
-          
-          // Navigate to study edit form
-          if (processUri) {
-            // Find study by process URI and redirect to edit form
-            window.location.href = '/std/processbasedstudy/edit/byprocess/' + encodeURIComponent(processUri);
-          } else {
-            alert('No process URI found. Please save the workflow first.');
-          }
-        });
-      }
-    }
-    
-    // Wait for CTT editor to load before showing panel
-    var checkInterval = setInterval(function() {
-      var container = document.getElementById('ctt-workflow-app');
-      if (container && container.querySelector('*').length > 10) {
-        clearInterval(checkInterval);
-        setTimeout(initStudyMetadataPanel, 1000);
-      }
-    }, 500);
-    
-    // Cleanup after 30 seconds
-    setTimeout(function() {
-      clearInterval(checkInterval);
-    }, 30000);
   })();
 </script>

@@ -99,40 +99,291 @@
     state.feedback.textContent = message;
   };
 
-  const updateLanguageFilter = function (state, tools) {
-    if (!state.filterLanguage) {
-      return;
-    }
-
-    const previous = String(state.filterLanguage.value || "").trim();
-    const languages = new Set();
-
-    tools.forEach(function (tool) {
-      const language = String(tool.language || "").trim();
-      if (language !== "") {
-        languages.add(language);
-      }
-    });
-
-    const sorted = Array.from(languages).sort(function (a, b) {
-      return a.localeCompare(b);
-    });
-
-    let options = '<option value="">All languages</option>';
-    sorted.forEach(function (language) {
-      const selected = previous.toLowerCase() === language.toLowerCase() ? ' selected="selected"' : "";
-      options += '<option value="' + escapeHtml(language) + '"' + selected + '>' + escapeHtml(language) + "</option>";
-    });
-
-    state.filterLanguage.innerHTML = options;
-  };
-
-  const getStudyUri = function (state) {
-    if (!state.filterStudyUri) {
+  const deriveProcessUriFromEntity = function (item) {
+    if (!item || typeof item !== "object") {
       return "";
     }
 
-    return String(state.filterStudyUri.value || "").trim();
+    const candidates = [
+      item.uri,
+      item.hasURI,
+      item.processUri,
+      item.workflowUri,
+      item.hasProcessUri,
+      item.hasWorkflowUri,
+    ];
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const value = String(candidates[i] || "").trim();
+      if (isHttpUri(value)) {
+        return value;
+      }
+    }
+
+    return "";
+  };
+
+  const deriveScenarioUriFromEntity = function (item) {
+    if (!item || typeof item !== "object") {
+      return "";
+    }
+
+    const candidates = [
+      item.scenarioUri,
+      item.hasScenarioUri,
+      item.hasScenario,
+      item.hasSIRPartOf,
+      item.partOfScenarioUri,
+    ];
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const value = String(candidates[i] || "").trim();
+      if (isHttpUri(value)) {
+        return value;
+      }
+    }
+
+    return "";
+  };
+
+  const deriveProcessLabelFromEntity = function (item, fallbackUri) {
+    if (!item || typeof item !== "object") {
+      return fallbackUri;
+    }
+
+    const candidates = [
+      item.label,
+      item.hasContent,
+      item.name,
+      item.title,
+    ];
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const value = String(candidates[i] || "").trim();
+      if (value !== "") {
+        return value;
+      }
+    }
+
+    return fallbackUri;
+  };
+
+  const toSelectOptionsHtml = function (values, selectedValue, emptyLabel) {
+    const selected = String(selectedValue || "").trim();
+    let options = '<option value="">' + escapeHtml(emptyLabel) + "</option>";
+
+    values.forEach(function (item) {
+      const value = String(item.value || "").trim();
+      const label = String(item.label || value).trim();
+      if (value === "") {
+        return;
+      }
+      const isSelected = selected !== "" && selected === value;
+      options += '<option value="' + escapeHtml(value) + '"' + (isSelected ? ' selected="selected"' : "") + '>' + escapeHtml(label) + "</option>";
+    });
+
+    return options;
+  };
+
+  const refreshScenarioFilterOptions = function (state, tools) {
+    if (!state.filterScenarioUri) {
+      return;
+    }
+
+    const current = String(state.filterScenarioUri.value || state.initialScenarioUri || "").trim();
+    const scenarioMap = {};
+
+    (state.processEntries || []).forEach(function (entry) {
+      const scenarioUri = String(entry.scenarioUri || "").trim();
+      if (isHttpUri(scenarioUri)) {
+        scenarioMap[scenarioUri] = scenarioUri;
+      }
+    });
+
+    (Array.isArray(tools) ? tools : []).forEach(function (tool) {
+      const scenarioUri = String(tool.scenarioUri || "").trim();
+      if (isHttpUri(scenarioUri)) {
+        scenarioMap[scenarioUri] = scenarioUri;
+      }
+    });
+
+    const scenarios = Object.keys(scenarioMap).sort(function (a, b) {
+      return a.localeCompare(b);
+    }).map(function (uri) {
+      return { value: uri, label: uri };
+    });
+
+    if (isHttpUri(state.initialScenarioUri) && !Object.prototype.hasOwnProperty.call(scenarioMap, state.initialScenarioUri)) {
+      scenarios.unshift({ value: state.initialScenarioUri, label: state.initialScenarioUri });
+    }
+
+    state.filterScenarioUri.innerHTML = toSelectOptionsHtml(scenarios, current, "Any scenario");
+  };
+
+  const refreshOwnerFilterOptions = function (state, tools) {
+    if (!state.filterOwner) {
+      return;
+    }
+
+    const current = String(state.filterOwner.value || "").trim();
+    const ownerMap = {};
+    (Array.isArray(tools) ? tools : []).forEach(function (tool) {
+      const owner = String(tool.ownerUserEmail || tool.owner || tool.createdBy || "").trim();
+      if (owner !== "") {
+        ownerMap[owner] = owner;
+      }
+    });
+
+    const owners = Object.keys(ownerMap).sort(function (a, b) {
+      return a.localeCompare(b);
+    }).map(function (owner) {
+      return { value: owner, label: owner };
+    });
+
+    state.filterOwner.innerHTML = toSelectOptionsHtml(owners, current, "Any owner");
+  };
+
+  const refreshProcessFilterOptions = function (state) {
+    if (!state.filterProcessUri) {
+      return;
+    }
+
+    const current = String(state.filterProcessUri.value || state.initialProcessUri || "").trim();
+    const selectedScenario = String(state.filterScenarioUri && state.filterScenarioUri.value || "").trim();
+
+    const processMap = {};
+    (state.processEntries || []).forEach(function (entry) {
+      const processUri = String(entry.processUri || "").trim();
+      const scenarioUri = String(entry.scenarioUri || "").trim();
+      if (!isHttpUri(processUri)) {
+        return;
+      }
+      if (selectedScenario !== "" && scenarioUri !== selectedScenario) {
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(processMap, processUri)) {
+        processMap[processUri] = {
+          value: processUri,
+          label: String(entry.label || processUri).trim() || processUri,
+        };
+      }
+    });
+
+    if (isHttpUri(state.initialProcessUri) && !Object.prototype.hasOwnProperty.call(processMap, state.initialProcessUri)) {
+      const canIncludeInitial = selectedScenario === ""
+        || !isHttpUri(state.initialScenarioUri)
+        || state.initialScenarioUri === selectedScenario;
+      if (canIncludeInitial) {
+        processMap[state.initialProcessUri] = {
+          value: state.initialProcessUri,
+          label: state.initialProcessUri,
+        };
+      }
+    }
+
+    const options = Object.values(processMap).sort(function (a, b) {
+      return String(a.label || "").localeCompare(String(b.label || ""));
+    });
+    state.filterProcessUri.innerHTML = toSelectOptionsHtml(options, current, "All processes");
+  };
+
+  const mergeProcessEntries = function (state, tools) {
+    const entries = {};
+
+    (state.processEntries || []).forEach(function (entry) {
+      const processUri = String(entry.processUri || "").trim();
+      if (!isHttpUri(processUri)) {
+        return;
+      }
+      entries[processUri] = {
+        processUri: processUri,
+        label: String(entry.label || processUri).trim() || processUri,
+        scenarioUri: String(entry.scenarioUri || "").trim(),
+      };
+    });
+
+    (Array.isArray(tools) ? tools : []).forEach(function (tool) {
+      const processUri = String(tool.processUri || "").trim();
+      if (!isHttpUri(processUri)) {
+        return;
+      }
+
+      const scenarioUri = String(tool.scenarioUri || "").trim();
+      if (!Object.prototype.hasOwnProperty.call(entries, processUri)) {
+        entries[processUri] = {
+          processUri: processUri,
+          label: processUri,
+          scenarioUri: scenarioUri,
+        };
+        return;
+      }
+
+      if (entries[processUri].scenarioUri === "" && isHttpUri(scenarioUri)) {
+        entries[processUri].scenarioUri = scenarioUri;
+      }
+    });
+
+    state.processEntries = Object.values(entries);
+  };
+
+  const loadProcesses = async function (state) {
+    state.processEntries = [];
+
+    const endpoint = String(state.processListEndpoint || "").trim();
+    if (endpoint === "") {
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.set("pageSize", "500");
+      params.set("offset", "0");
+      const url = endpoint + (endpoint.indexOf("?") === -1 ? "?" : "&") + params.toString();
+
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "same-origin",
+      });
+
+      const payload = await parseResponsePayload(response);
+      if (!response.ok) {
+        return;
+      }
+
+      let processList = [];
+      if (Array.isArray(payload)) {
+        processList = payload;
+      } else if (payload && Array.isArray(payload.body)) {
+        processList = payload.body;
+      } else if (payload && payload.body && Array.isArray(payload.body.body)) {
+        processList = payload.body.body;
+      } else if (payload && payload.result && Array.isArray(payload.result)) {
+        processList = payload.result;
+      } else if (payload && payload.data && Array.isArray(payload.data)) {
+        processList = payload.data;
+      }
+
+      state.processEntries = processList.map(function (item) {
+        const processUri = deriveProcessUriFromEntity(item);
+        return {
+          processUri: processUri,
+          label: deriveProcessLabelFromEntity(item, processUri),
+          scenarioUri: deriveScenarioUriFromEntity(item),
+        };
+      }).filter(function (entry) {
+        return isHttpUri(entry.processUri);
+      });
+    } catch {
+      state.processEntries = [];
+    }
+  };
+
+  const getProcessUri = function (state) {
+    if (!state.filterProcessUri) {
+      return "";
+    }
+
+    return String(state.filterProcessUri.value || "").trim();
   };
 
   const renderTable = function (state, tools) {
@@ -143,30 +394,33 @@
     state.toolsByUri = {};
 
     if (!Array.isArray(tools) || tools.length === 0) {
-      state.tableBody.innerHTML = '<tr><td colspan="13" class="text-center text-muted">No analytical tools were found for the selected filters.</td></tr>';
+      state.tableBody.innerHTML = '<tr><td colspan="12" class="text-center text-muted">No analytical tools were found for the selected filters.</td></tr>';
       return;
     }
 
-    const studyUri = getStudyUri(state);
-    const actionsEnabled = studyUri !== "";
-
     const rows = tools.map(function (tool) {
       const toolUri = String(tool.toolUri || "").trim();
-      const tags = toTagArray(tool.tags).join(", ");
       const author = String(tool.author || "").trim();
+      const owner = String(tool.ownerUserEmail || tool.owner || tool.createdBy || "").trim();
+      const processUri = String(tool.processUri || "").trim();
       const institution = String(tool.institution || "").trim();
-      const scenarioUri = String(tool.scenarioUri || "").trim();
-      const datasetUri = String(tool.datasetUri || "").trim();
       const releaseDate = String(tool.releaseDate || "").trim();
       state.toolsByUri[toolUri] = tool;
 
-      let actionButtons = ""
-        + '<button type="button" class="btn btn-sm btn-outline-primary" data-action="edit" data-tool-uri="' + escapeHtml(toolUri) + '">Edit</button>'
-        + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="remove" data-tool-uri="' + escapeHtml(toolUri) + '">Remove</button>';
+      let actionButtons = "";
+      const canUpdate = Boolean(tool.canUpdate);
+      const canDelete = Boolean(tool.canDelete);
 
-      if (actionsEnabled) {
-        const isAssociated = Boolean(tool.isAssociated);
-        actionButtons += '<button type="button" class="btn btn-sm ' + (isAssociated ? "btn-outline-secondary" : "btn-outline-success") + '" data-action="' + (isAssociated ? "dissociate" : "associate") + '" data-tool-uri="' + escapeHtml(toolUri) + '">' + (isAssociated ? "Dissociate" : "Associate") + "</button>";
+      if (canUpdate) {
+        actionButtons += '<button type="button" class="btn btn-sm btn-outline-primary" data-action="edit" data-tool-uri="' + escapeHtml(toolUri) + '">Edit</button>';
+      }
+
+      if (canDelete) {
+        actionButtons += '<button type="button" class="btn btn-sm btn-outline-danger" data-action="remove" data-tool-uri="' + escapeHtml(toolUri) + '">Remove</button>';
+      }
+
+      if (!canUpdate && !canDelete) {
+        actionButtons = '<span class="badge bg-light text-dark border">Read only</span>';
       }
 
       return ""
@@ -175,13 +429,12 @@
         + "<td>" + escapeHtml(tool.version || "") + "</td>"
         + "<td>" + escapeHtml(tool.language || "") + "</td>"
         + "<td>" + escapeHtml(tool.status || "") + "</td>"
+        + "<td>" + escapeHtml(owner) + "</td>"
+        + "<td class=\"ctt-tools-uri\">" + escapeHtml(processUri) + "</td>"
         + "<td>" + escapeHtml(author) + "</td>"
         + "<td>" + escapeHtml(institution) + "</td>"
-        + "<td class=\"ctt-tools-uri\">" + escapeHtml(scenarioUri) + "</td>"
-        + "<td class=\"ctt-tools-uri\">" + escapeHtml(datasetUri) + "</td>"
         + "<td>" + escapeHtml(releaseDate) + "</td>"
         + "<td class=\"ctt-tools-uri\">" + escapeHtml(toolUri) + "</td>"
-        + "<td>" + escapeHtml(tags) + "</td>"
         + "<td>" + escapeHtml(tool.updatedAt || tool.createdAt || "") + "</td>"
         + "<td class=\"ctt-tools-actions\">" + actionButtons + "</td>"
         + "</tr>";
@@ -208,33 +461,25 @@
     }
 
     if (state.tableBody) {
-      state.tableBody.innerHTML = '<tr><td colspan="13" class="text-center text-muted">Loading tools catalog...</td></tr>';
+      state.tableBody.innerHTML = '<tr><td colspan="12" class="text-center text-muted">Loading tool collection...</td></tr>';
     }
 
     const params = new URLSearchParams();
 
-    const q = String(state.filterQ && state.filterQ.value || "").trim();
-    const status = String(state.filterStatus && state.filterStatus.value || "").trim();
     const language = String(state.filterLanguage && state.filterLanguage.value || "").trim();
-    const author = String(state.filterAuthor && state.filterAuthor.value || "").trim();
+    const owner = String(state.filterOwner && state.filterOwner.value || "").trim();
+    const processUri = String(state.filterProcessUri && state.filterProcessUri.value || "").trim();
     const institution = String(state.filterInstitution && state.filterInstitution.value || "").trim();
     const scenarioUri = String(state.filterScenarioUri && state.filterScenarioUri.value || "").trim();
     const datasetUri = String(state.filterDatasetUri && state.filterDatasetUri.value || "").trim();
-    const dateFrom = String(state.filterDateFrom && state.filterDateFrom.value || "").trim();
-    const dateTo = String(state.filterDateTo && state.filterDateTo.value || "").trim();
-    const studyUri = getStudyUri(state);
-
-    if (q !== "") {
-      params.set("q", q);
-    }
-    if (status !== "") {
-      params.set("status", status);
-    }
     if (language !== "") {
       params.set("language", language);
     }
-    if (author !== "") {
-      params.set("author", author);
+    if (owner !== "") {
+      params.set("owner", owner);
+    }
+    if (processUri !== "") {
+      params.set("processUri", processUri);
     }
     if (institution !== "") {
       params.set("institution", institution);
@@ -244,15 +489,6 @@
     }
     if (datasetUri !== "") {
       params.set("datasetUri", datasetUri);
-    }
-    if (dateFrom !== "") {
-      params.set("dateFrom", dateFrom);
-    }
-    if (dateTo !== "") {
-      params.set("dateTo", dateTo);
-    }
-    if (studyUri !== "") {
-      params.set("studyUri", studyUri);
     }
     params.set("limit", "200");
     params.set("offset", "0");
@@ -267,20 +503,23 @@
 
       const payload = await parseResponsePayload(response);
       if (!response.ok || !payload || payload.isSuccessful === false) {
-        const message = getIssueMessage(payload, "Unable to load analytical tools catalog.");
+        const message = getIssueMessage(payload, "Unable to load analytical tool collection.");
         setFeedback(state, "error", message);
         renderTable(state, []);
         return;
       }
 
       const tools = Array.isArray(payload.body) ? payload.body : [];
-      updateLanguageFilter(state, tools);
+      mergeProcessEntries(state, tools);
+      refreshScenarioFilterOptions(state, tools);
+      refreshProcessFilterOptions(state);
+      refreshOwnerFilterOptions(state, tools);
       renderTable(state, tools);
 
       const total = Number(payload.pagination && payload.pagination.total || tools.length || 0);
       setFeedback(state, "success", "Loaded " + total + " analytical tool(s).");
     } catch (error) {
-      setFeedback(state, "error", "Failed to load analytical tools catalog.");
+      setFeedback(state, "error", "Failed to load analytical tool collection.");
       renderTable(state, []);
     }
   };
@@ -292,8 +531,8 @@
     if (state.toolUri) {
       state.toolUri.value = "";
     }
-    if (state.toolStatus && state.statuses.length > 0) {
-      state.toolStatus.value = state.statuses[0];
+    if (state.toolProcessUri && state.initialProcessUri) {
+      state.toolProcessUri.value = state.initialProcessUri;
     }
   };
 
@@ -314,9 +553,6 @@
     if (state.toolLanguage) {
       state.toolLanguage.value = String(tool.language || "");
     }
-    if (state.toolStatus) {
-      state.toolStatus.value = String(tool.status || "draft");
-    }
     if (state.toolReleaseDate) {
       state.toolReleaseDate.value = String(tool.releaseDate || "");
     }
@@ -325,6 +561,12 @@
     }
     if (state.toolInstitution) {
       state.toolInstitution.value = String(tool.institution || "");
+    }
+    if (state.toolProcessUri) {
+      state.toolProcessUri.value = String(tool.processUri || "");
+    }
+    if (state.toolOwnerPersonUri) {
+      state.toolOwnerPersonUri.value = String(tool.ownerPersonUri || "");
     }
     if (state.toolScenarioUri) {
       state.toolScenarioUri.value = String(tool.scenarioUri || "");
@@ -374,19 +616,26 @@
       return;
     }
 
-    const studyUri = normalizeUriFieldValue(state.filterStudyUri);
+    const processUri = normalizeUriFieldValue(state.toolProcessUri);
     const scenarioUri = normalizeUriFieldValue(state.toolScenarioUri);
     const datasetUri = normalizeUriFieldValue(state.toolDatasetUri);
     const sourceRepositoryUri = normalizeUriFieldValue(state.toolSourceUri);
     const artifactUri = normalizeUriFieldValue(state.toolArtifactUri);
+    const ownerPersonUri = normalizeUriFieldValue(state.toolOwnerPersonUri);
 
     const uriChecks = [
-      validateOptionalUriField(studyUri, "Study URI"),
+      validateOptionalUriField(processUri, "Process URI"),
       validateOptionalUriField(scenarioUri, "Scenario URI"),
       validateOptionalUriField(datasetUri, "Dataset URI"),
       validateOptionalUriField(sourceRepositoryUri, "Source Repository URI"),
-      validateOptionalUriField(artifactUri, "Artifact URI")
+      validateOptionalUriField(artifactUri, "Artifact URI"),
+      validateOptionalUriField(ownerPersonUri, "Owner Person URI")
     ];
+
+    if (processUri === "") {
+      setFeedback(state, "warning", "Process URI is required.");
+      return;
+    }
 
     for (let i = 0; i < uriChecks.length; i += 1) {
       if (uriChecks[i] && uriChecks[i].ok === false) {
@@ -397,13 +646,14 @@
 
     const payload = {
       action: "upsert",
-      studyUri: studyUri || undefined,
       tool: {
         toolUri: String(state.toolUri && state.toolUri.value || "").trim(),
         name: name,
+        processUri: processUri,
+        ownerPersonUri: ownerPersonUri,
         version: String(state.toolVersion && state.toolVersion.value || "").trim(),
         language: String(state.toolLanguage && state.toolLanguage.value || "").trim(),
-        status: String(state.toolStatus && state.toolStatus.value || "draft").trim().toLowerCase(),
+          status: "current",
         releaseDate: String(state.toolReleaseDate && state.toolReleaseDate.value || "").trim(),
         author: String(state.toolAuthor && state.toolAuthor.value || "").trim(),
         institution: String(state.toolInstitution && state.toolInstitution.value || "").trim(),
@@ -430,6 +680,11 @@
       state.toolUri.value = savedToolUri;
     }
 
+    if (state.mode === "editor" && state.collectionPageUrl) {
+      window.location.href = state.collectionPageUrl;
+      return;
+    }
+
     await loadTools(state);
   };
 
@@ -443,13 +698,18 @@
     }
 
     if (normalizedAction === "edit") {
+      if (state.editorPageUrl) {
+        const editUrl = state.editorPageUrl + (state.editorPageUrl.indexOf("?") === -1 ? "?" : "&") + "toolUri=" + encodeURIComponent(normalizedToolUri);
+        window.location.href = editUrl;
+        return;
+      }
+
       fillEditorForm(state, state.toolsByUri[normalizedToolUri] || null);
-      setFeedback(state, "success", "Editing selected tool metadata.");
       return;
     }
 
     if (normalizedAction === "remove") {
-      if (!window.confirm("Remove this analytical tool from the catalog?")) {
+      if (!window.confirm("Remove this analytical tool from the collection?")) {
         return;
       }
 
@@ -468,34 +728,43 @@
       await loadTools(state);
       return;
     }
+  };
 
-    if (normalizedAction === "associate" || normalizedAction === "dissociate") {
-      const studyUri = getStudyUri(state);
-      if (studyUri === "") {
-        setFeedback(state, "warning", "Set a Study URI in filters before associating tools.");
+  const loadSingleToolForEditor = async function (state, toolUri) {
+    const normalizedToolUri = String(toolUri || "").trim();
+    if (normalizedToolUri === "") {
+      return;
+    }
+
+    const params = new URLSearchParams();
+    params.set("toolUri", normalizedToolUri);
+    params.set("limit", "1");
+    const url = state.endpoint + (state.endpoint.indexOf("?") === -1 ? "?" : "&") + params.toString();
+
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "same-origin",
+      });
+      const payload = await parseResponsePayload(response);
+      if (!response.ok || !payload || payload.isSuccessful === false) {
+        setFeedback(state, "error", "Unable to load selected tool for editing.");
         return;
       }
 
-      const associationResult = await postAction(state, {
-        action: normalizedAction,
-        toolUri: normalizedToolUri,
-        studyUri: studyUri,
+      const tools = Array.isArray(payload.body) ? payload.body : [];
+      const match = tools.find(function (tool) {
+        return String(tool.toolUri || "").trim() === normalizedToolUri;
       });
 
-      if (!associationResult.ok || !associationResult.payload || associationResult.payload.isSuccessful === false) {
-        const message = getIssueMessage(associationResult.payload, "Unable to update study association.");
-        setFeedback(state, "error", message);
+      if (!match) {
+        setFeedback(state, "warning", "Selected tool was not found.");
         return;
       }
 
-      setFeedback(
-        state,
-        "success",
-        normalizedAction === "associate"
-          ? "Tool associated with current study."
-          : "Tool dissociated from current study."
-      );
-      await loadTools(state);
+      fillEditorForm(state, match);
+    } catch {
+      setFeedback(state, "error", "Unable to load selected tool for editing.");
     }
   };
 
@@ -504,34 +773,30 @@
       once("ctt-tools-repository", "#ctt-tools-repository-page", context).forEach(function (root) {
         const settings = (drupalSettings && drupalSettings.cttToolsRepository) ? drupalSettings.cttToolsRepository : {};
         const endpoint = String(settings.endpoint || "").trim();
-        const statuses = Array.isArray(settings.statuses) ? settings.statuses : [];
-
         const state = {
           root: root,
           endpoint: endpoint,
-          statuses: statuses,
+          processListEndpoint: String(settings.processListEndpoint || "").trim(),
+          processEntries: [],
           toolsByUri: {},
           feedback: root.querySelector("#ctt-tools-feedback"),
           filterForm: root.querySelector("#ctt-tools-filter-form"),
-          filterQ: root.querySelector("#ctt-tools-filter-q"),
-          filterStudyUri: root.querySelector("#ctt-tools-filter-study-uri"),
+          filterOwner: root.querySelector("#ctt-tools-filter-owner"),
+          filterProcessUri: root.querySelector("#ctt-tools-filter-process-uri"),
           filterLanguage: root.querySelector("#ctt-tools-filter-language"),
-          filterStatus: root.querySelector("#ctt-tools-filter-status"),
-          filterAuthor: root.querySelector("#ctt-tools-filter-author"),
           filterInstitution: root.querySelector("#ctt-tools-filter-institution"),
           filterScenarioUri: root.querySelector("#ctt-tools-filter-scenario-uri"),
           filterDatasetUri: root.querySelector("#ctt-tools-filter-dataset-uri"),
-          filterDateFrom: root.querySelector("#ctt-tools-filter-date-from"),
-          filterDateTo: root.querySelector("#ctt-tools-filter-date-to"),
           editorForm: root.querySelector("#ctt-tools-editor-form"),
           toolUri: root.querySelector("#ctt-tool-uri"),
           toolName: root.querySelector("#ctt-tool-name"),
           toolVersion: root.querySelector("#ctt-tool-version"),
           toolLanguage: root.querySelector("#ctt-tool-language"),
-          toolStatus: root.querySelector("#ctt-tool-status"),
           toolReleaseDate: root.querySelector("#ctt-tool-release-date"),
           toolAuthor: root.querySelector("#ctt-tool-author"),
           toolInstitution: root.querySelector("#ctt-tool-institution"),
+          toolProcessUri: root.querySelector("#ctt-tool-process-uri"),
+          toolOwnerPersonUri: root.querySelector("#ctt-tool-owner-person-uri"),
           toolScenarioUri: root.querySelector("#ctt-tool-scenario-uri"),
           toolDatasetUri: root.querySelector("#ctt-tool-dataset-uri"),
           toolSourceUri: root.querySelector("#ctt-tool-source-uri"),
@@ -541,20 +806,28 @@
           toolDescription: root.querySelector("#ctt-tool-description"),
           resetButton: root.querySelector("#ctt-tool-reset"),
           tableBody: root.querySelector("#ctt-tools-repository-body"),
+          mode: String(settings.mode || "collection").trim().toLowerCase(),
+          editorPageUrl: String(settings.editorPageUrl || "").trim(),
+          collectionPageUrl: String(settings.collectionPageUrl || "").trim(),
+          editorToolUri: String(settings.editorToolUri || "").trim(),
+          initialProcessUri: String(settings.initialProcessUri || "").trim(),
+          initialScenarioUri: String(settings.initialScenarioUri || "").trim(),
         };
 
-        if (state.filterStudyUri && settings.initialStudyUri) {
-          state.filterStudyUri.value = String(settings.initialStudyUri);
-        }
-
-        if (state.toolStatus && statuses.length > 0 && String(state.toolStatus.value || "").trim() === "") {
-          state.toolStatus.value = String(statuses[0]);
+        if (state.filterScenarioUri && settings.initialScenarioUri) {
+          state.filterScenarioUri.value = String(settings.initialScenarioUri);
         }
 
         if (state.filterForm) {
           state.filterForm.addEventListener("submit", function (event) {
             event.preventDefault();
             loadTools(state);
+          });
+        }
+
+        if (state.filterScenarioUri) {
+          state.filterScenarioUri.addEventListener("change", function () {
+            refreshProcessFilterOptions(state);
           });
         }
 
@@ -587,7 +860,17 @@
           });
         }
 
-        loadTools(state);
+        if (state.mode === "editor") {
+          if (state.editorToolUri !== "") {
+            loadSingleToolForEditor(state, state.editorToolUri);
+          }
+        } else {
+          loadProcesses(state).then(function () {
+            refreshScenarioFilterOptions(state, []);
+            refreshProcessFilterOptions(state);
+            loadTools(state);
+          });
+        }
       });
     },
   };

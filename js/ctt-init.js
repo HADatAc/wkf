@@ -844,6 +844,822 @@
     });
   }
 
+  function textIncludesAny(value, candidates) {
+    var normalized = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+    return candidates.some(function (candidate) {
+      return normalized.indexOf(String(candidate).toLowerCase()) !== -1;
+    });
+  }
+
+  function ensureSpecialExecutionPanel(container) {
+    if (!container || !container.parentNode) {
+      return null;
+    }
+
+    var existing = container.parentNode.querySelector('.ctt-special-execution-panel');
+    if (existing) {
+      return existing;
+    }
+
+    var panel = document.createElement('section');
+    panel.className = 'ctt-special-execution-panel';
+    panel.innerHTML = ''
+      + '<div class="ctt-special-execution-panel__title">Process Execution</div>'
+      + '<div class="ctt-special-execution-panel__status" data-ctt-special-status="1">Preparing execution...</div>';
+    var interactionHost = document.getElementById('ctt-execution-interaction-host');
+    if (interactionHost && interactionHost.parentNode === container.parentNode) {
+      container.parentNode.insertBefore(panel, interactionHost);
+    }
+    else {
+      container.parentNode.insertBefore(panel, container);
+    }
+    return panel;
+  }
+
+  function setSpecialExecutionStatus(panel, message, state) {
+    if (!panel) {
+      return;
+    }
+    var statusNode = panel.querySelector('[data-ctt-special-status="1"]');
+    if (!statusNode) {
+      return;
+    }
+
+    statusNode.textContent = String(message || '').trim();
+    statusNode.setAttribute('data-ctt-special-state', String(state || 'neutral').trim());
+  }
+
+  function getTaskPanelScope(container) {
+    if (container && container.__cttRelocatedTaskTracker && container.__cttRelocatedTaskTracker.isConnected) {
+      return container.__cttRelocatedTaskTracker;
+    }
+
+    if (container) {
+      var candidate = findTaskTrackerCandidate(container);
+      if (candidate) {
+        return candidate;
+      }
+    }
+
+    if (document && document.querySelector) {
+      return document.querySelector('[aria-label="Tasks panel"]');
+    }
+
+    return null;
+  }
+
+  function isTaskProgressButton(button) {
+    if (!button) {
+      return false;
+    }
+
+    var label = normalizeControlText(button);
+    if (!label || label.length < 6) {
+      return false;
+    }
+
+    // Keep only meaningful task rows and ignore panel/tool controls.
+    if (/(run test|reset test|auto-organize|auto order tasks|toggle test panel|collapse tasks panel|close tasks panel|workflow details|layout settings|tasks \(layers\)|collaborators|zoom in|zoom out|fit view|toggle interactivity|validation)/.test(label)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function getTaskProgressButtons(taskPanel) {
+    if (!taskPanel || !taskPanel.querySelectorAll) {
+      return [];
+    }
+
+    var controls = taskPanel.querySelectorAll('button, [role="button"]');
+    var tasks = [];
+    controls.forEach(function (control) {
+      if (!isTaskProgressButton(control)) {
+        return;
+      }
+      tasks.push(control);
+    });
+
+    return tasks;
+  }
+
+  function getTaskButtonLabel(button) {
+    if (!button) {
+      return '';
+    }
+    return String(button.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function markTaskAsActive(tasks, activeButton) {
+    tasks.forEach(function (task) {
+      if (!task || !task.setAttribute) {
+        return;
+      }
+      if (task === activeButton) {
+        task.setAttribute('data-ctt-task-active', '1');
+      }
+      else {
+        task.removeAttribute('data-ctt-task-active');
+      }
+    });
+  }
+
+  function getActiveTaskIndex(tasks) {
+    var i;
+    for (i = 0; i < tasks.length; i += 1) {
+      var task = tasks[i];
+      var dataActive = task.getAttribute && task.getAttribute('data-ctt-task-active') === '1';
+      var ariaCurrent = task.getAttribute && task.getAttribute('aria-current') === 'true';
+      var ariaPressed = task.getAttribute && task.getAttribute('aria-pressed') === 'true';
+      var className = String(task.className || '').toLowerCase();
+      var classActive = /(active|selected|current)/.test(className);
+      if (dataActive || ariaCurrent || ariaPressed || classActive) {
+        return i;
+      }
+    }
+
+    if (tasks.length > 0) {
+      return 0;
+    }
+
+    return -1;
+  }
+
+  function ensureTaskProgressNavigator(panel) {
+    if (!panel) {
+      return null;
+    }
+
+    var existing = panel.querySelector('[data-ctt-task-nav="1"]');
+    if (existing) {
+      return existing;
+    }
+
+    var nav = document.createElement('div');
+    nav.className = 'ctt-special-task-nav';
+    nav.setAttribute('data-ctt-task-nav', '1');
+    nav.innerHTML = ''
+      + '<div class="ctt-special-task-nav__title">Task Progression</div>'
+      + '<div class="ctt-special-task-nav__hint">Use Previous/Next to move task by task.</div>'
+      + '<div class="ctt-special-task-nav__current" data-ctt-task-current="1">Waiting for task list...</div>'
+      + '<div class="ctt-special-task-nav__actions">'
+      + '  <button type="button" class="btn btn-sm btn-outline-primary" data-ctt-task-prev="1">Previous</button>'
+      + '  <button type="button" class="btn btn-sm btn-primary" data-ctt-task-next="1">Next</button>'
+      + '</div>';
+
+    panel.appendChild(nav);
+    return nav;
+  }
+
+  function extractTaskUri(button) {
+    if (!button) {
+      return '';
+    }
+
+    var raw = [
+      button.getAttribute && button.getAttribute('aria-label') || '',
+      button.getAttribute && button.getAttribute('title') || '',
+      button.textContent || ''
+    ].join(' ');
+
+    var match = raw.match(/https?:\/\/[^\s)]+/i);
+    if (!match || !match[0]) {
+      return '';
+    }
+
+    return String(match[0]).replace(/[.,;:!?]$/, '').trim();
+  }
+
+  function getTaskLabelWithoutUri(button) {
+    var label = getTaskButtonLabel(button);
+    if (!label) {
+      return '';
+    }
+
+    return label
+      .replace(/https?:\/\/\S+/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function syncCanvasWithTask(container, taskButton) {
+    if (!container || !taskButton || !container.querySelectorAll) {
+      return;
+    }
+
+    var allNodes = container.querySelectorAll('.react-flow__node[data-id], [class*="react-flow__node"][data-id]');
+    allNodes.forEach(function (node) {
+      node.removeAttribute('data-ctt-current-task-node');
+      node.classList.remove('ctt-current-task-node');
+    });
+
+    if (!allNodes.length) {
+      return;
+    }
+
+    var taskUri = extractTaskUri(taskButton);
+    var targetNode = null;
+
+    if (taskUri) {
+      for (var i = 0; i < allNodes.length; i += 1) {
+        if (String(allNodes[i].getAttribute('data-id') || '').trim() === taskUri) {
+          targetNode = allNodes[i];
+          break;
+        }
+      }
+    }
+
+    if (!targetNode) {
+      var taskText = getTaskLabelWithoutUri(taskButton).toLowerCase();
+      if (taskText) {
+        for (var j = 0; j < allNodes.length; j += 1) {
+          var nodeText = String(allNodes[j].textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          if (nodeText && nodeText.indexOf(taskText) !== -1) {
+            targetNode = allNodes[j];
+            break;
+          }
+        }
+      }
+    }
+
+    if (!targetNode) {
+      return;
+    }
+
+    targetNode.setAttribute('data-ctt-current-task-node', '1');
+    targetNode.classList.add('ctt-current-task-node');
+
+    // Trigger the editor's own selection behavior without requiring pointer interaction.
+    if (typeof targetNode.click === 'function') {
+      targetNode.click();
+    }
+  }
+
+  function installTaskProgressNavigator(panel, container, hooks) {
+    if (!panel || !container) {
+      return;
+    }
+
+    var nav = ensureTaskProgressNavigator(panel);
+    if (!nav) {
+      return;
+    }
+
+    if (nav.__cttTaskNavBound) {
+      return;
+    }
+    nav.__cttTaskNavBound = true;
+
+    var currentNode = nav.querySelector('[data-ctt-task-current="1"]');
+    var prevButton = nav.querySelector('[data-ctt-task-prev="1"]');
+    var nextButton = nav.querySelector('[data-ctt-task-next="1"]');
+
+    function updateNavigatorState() {
+      var taskPanel = getTaskPanelScope(container);
+      var tasks = getTaskProgressButtons(taskPanel);
+      var activeIndex = getActiveTaskIndex(tasks);
+
+      if (!tasks.length || activeIndex < 0) {
+        if (currentNode) {
+          currentNode.textContent = 'Waiting for task list...';
+        }
+        if (prevButton) {
+          prevButton.disabled = true;
+        }
+        if (nextButton) {
+          nextButton.textContent = 'Next';
+          nextButton.disabled = true;
+        }
+        return;
+      }
+
+      var activeTask = tasks[activeIndex];
+      markTaskAsActive(tasks, activeTask);
+      syncCanvasWithTask(container, activeTask);
+
+      if (currentNode) {
+        var label = getTaskButtonLabel(activeTask) || 'Current task';
+        currentNode.textContent = 'Task ' + (activeIndex + 1) + ' of ' + tasks.length + ': ' + label;
+      }
+
+      if (prevButton) {
+        prevButton.disabled = activeIndex <= 0;
+      }
+      if (nextButton) {
+        if (activeIndex >= tasks.length - 1) {
+          nextButton.textContent = 'Finish';
+          nextButton.disabled = false;
+        }
+        else {
+          nextButton.textContent = 'Next';
+          nextButton.disabled = false;
+        }
+      }
+    }
+
+    function moveTask(offset) {
+      var taskPanel = getTaskPanelScope(container);
+      var tasks = getTaskProgressButtons(taskPanel);
+      var activeIndex = getActiveTaskIndex(tasks);
+      if (!tasks.length || activeIndex < 0) {
+        updateNavigatorState();
+        return;
+      }
+
+      var targetIndex = activeIndex + offset;
+      if (targetIndex < 0 || targetIndex >= tasks.length) {
+        if (offset > 0 && activeIndex === tasks.length - 1 && hooks && typeof hooks.onLastTaskAdvance === 'function') {
+          hooks.onLastTaskAdvance();
+        }
+        updateNavigatorState();
+        return;
+      }
+
+      var target = tasks[targetIndex];
+      markTaskAsActive(tasks, target);
+      target.click();
+      syncCanvasWithTask(container, target);
+      updateNavigatorState();
+    }
+
+    if (prevButton) {
+      prevButton.addEventListener('click', function () {
+        moveTask(-1);
+      });
+    }
+    if (nextButton) {
+      nextButton.addEventListener('click', function () {
+        moveTask(1);
+      });
+    }
+
+    container.addEventListener('click', function (event) {
+      var clicked = event && event.target && event.target.closest ? event.target.closest('button, [role="button"]') : null;
+      if (!clicked || !isTaskProgressButton(clicked)) {
+        return;
+      }
+
+      var taskPanel = getTaskPanelScope(container);
+      var tasks = getTaskProgressButtons(taskPanel);
+      if (!tasks.length) {
+        return;
+      }
+
+      if (tasks.indexOf(clicked) === -1) {
+        return;
+      }
+
+      markTaskAsActive(tasks, clicked);
+      syncCanvasWithTask(container, clicked);
+      updateNavigatorState();
+    });
+
+    panel.__cttTaskNavUpdate = updateNavigatorState;
+    updateNavigatorState();
+  }
+
+  function isExecutionView(settings) {
+    var mode = String(settings && settings.mode || '').trim().toLowerCase();
+    var special = settings && settings.specialExecution ? settings.specialExecution : {};
+    return mode === 'execution' || toBooleanFlag(special.enabled);
+  }
+
+  function isEditView(settings) {
+    return !isExecutionView(settings);
+  }
+
+  function findButtonByLabels(scope, labels) {
+    if (!scope || !scope.querySelectorAll) {
+      return null;
+    }
+
+    var controls = scope.querySelectorAll('button, [role="button"], a[role="button"], a');
+    for (var i = 0; i < controls.length; i += 1) {
+      var label = normalizeControlText(controls[i]);
+      if (textIncludesAny(label, labels)) {
+        return controls[i];
+      }
+    }
+
+    return null;
+  }
+
+  function findNodeByText(scope, labels) {
+    if (!scope || !scope.querySelectorAll) {
+      return null;
+    }
+
+    var nodes = scope.querySelectorAll('h1, h2, h3, h4, h5, p, span, div, strong');
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (textIncludesAny(nodes[i].textContent || '', labels)) {
+        return nodes[i];
+      }
+    }
+    return null;
+  }
+
+  function findExecutionPanelCandidate(scope) {
+    if (!scope || !scope.querySelectorAll) {
+      return null;
+    }
+
+    var buttons = scope.querySelectorAll('button, [role="button"], a[role="button"]');
+    for (var i = 0; i < buttons.length; i += 1) {
+      var label = normalizeControlText(buttons[i]);
+      if (!isExecutionActionLabel(label)) {
+        continue;
+      }
+
+      var current = buttons[i].parentElement;
+      var depth = 0;
+      while (current && depth < 9) {
+        var nestedButtons = current.querySelectorAll ? current.querySelectorAll('button, [role="button"], a[role="button"]') : [];
+        if (nestedButtons.length >= 3) {
+          return current;
+        }
+        current = current.parentElement;
+        depth += 1;
+      }
+    }
+
+    return null;
+  }
+
+  function findTaskTrackerCandidate(scope) {
+    if (!scope || !scope.querySelectorAll) {
+      return null;
+    }
+
+    var selectors = [
+      '[aria-label="Tasks panel"]',
+      '[role="complementary"][aria-label*="Tasks"]',
+      '[role="complementary"][aria-label*="tasks"]'
+    ];
+
+    for (var i = 0; i < selectors.length; i += 1) {
+      var matched = scope.querySelector(selectors[i]);
+      if (matched) {
+        return matched;
+      }
+    }
+
+    return null;
+  }
+
+  function ensureExecutionPanelsStack() {
+    var host = document.getElementById('ctt-execution-interaction-host');
+    if (!host) {
+      return null;
+    }
+
+    var stack = host.querySelector('.ctt-execution-panels-stack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.className = 'ctt-execution-panels-stack';
+      host.appendChild(stack);
+    }
+
+    host.classList.add('is-visible');
+    return stack;
+  }
+
+  function hideEditingControlsForExecution(root) {
+    if (!root || !root.querySelectorAll) {
+      return;
+    }
+
+    var controls = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
+    controls.forEach(function (control) {
+      var label = normalizeControlText(control);
+      var isEditingControl = /\b(save to api|save|tasks palette|task palette|create sub-?task|new sub-?task|new task|add child|add subtask|assign instrument|edit instrument|delete|remove|change parent|set root|auto order)\b/.test(label);
+      if (!isEditingControl) {
+        return;
+      }
+
+      control.setAttribute('data-ctt-hidden-edit-control', '1');
+      control.setAttribute('aria-hidden', 'true');
+      control.setAttribute('tabindex', '-1');
+      control.style.pointerEvents = 'none';
+      control.style.display = 'none';
+      if (control.tagName === 'BUTTON' || control.tagName === 'INPUT') {
+        control.setAttribute('disabled', 'disabled');
+      }
+    });
+  }
+
+  function hideExecutionControlsForEdit(root) {
+    if (!root || !root.querySelectorAll) {
+      return;
+    }
+
+    var controls = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
+    controls.forEach(function (control) {
+      var label = normalizeControlText(control);
+      if (!isExecutionActionLabel(label)) {
+        return;
+      }
+
+      control.setAttribute('data-ctt-hidden-exec-control', '1');
+      control.setAttribute('aria-hidden', 'true');
+      control.setAttribute('tabindex', '-1');
+      control.style.pointerEvents = 'none';
+      control.style.display = 'none';
+      if (control.tagName === 'BUTTON' || control.tagName === 'INPUT') {
+        control.setAttribute('disabled', 'disabled');
+      }
+    });
+
+    var panelCandidate = findExecutionPanelCandidate(root);
+    if (panelCandidate) {
+      panelCandidate.style.display = 'none';
+      panelCandidate.setAttribute('aria-hidden', 'true');
+      panelCandidate.setAttribute('data-ctt-hidden-exec-panel', '1');
+    }
+  }
+
+  function relocateInteractionPanelForExecution(container, settings) {
+    if (!isExecutionView(settings)) {
+      return;
+    }
+
+    var panelCandidate = container.__cttRelocatedExecutionPanel;
+    if (!panelCandidate || !panelCandidate.isConnected) {
+      panelCandidate = findExecutionPanelCandidate(container);
+    }
+    if (!panelCandidate) {
+      return;
+    }
+
+    container.__cttRelocatedExecutionPanel = panelCandidate;
+  }
+
+  function relocateTaskTrackerForExecution(container, settings) {
+    if (!isExecutionView(settings)) {
+      return;
+    }
+
+    var taskTracker = container.__cttRelocatedTaskTracker;
+    if (!taskTracker || !taskTracker.isConnected) {
+      taskTracker = findTaskTrackerCandidate(container);
+      if (!taskTracker && document && document.querySelector) {
+        taskTracker = document.querySelector('[aria-label="Tasks panel"]');
+      }
+    }
+    if (!taskTracker) {
+      return;
+    }
+
+    container.__cttRelocatedTaskTracker = taskTracker;
+  }
+
+  function enforceCanvasModeSplit(container, settings) {
+    if (!container) {
+      return;
+    }
+
+    var executionView = isExecutionView(settings);
+    container.setAttribute('data-ctt-execution-view', executionView ? '1' : '0');
+    var executionHost = document.getElementById('ctt-execution-interaction-host');
+
+    if (executionView) {
+      hideEditingControlsForExecution(container);
+      if (executionHost) {
+        hideEditingControlsForExecution(executionHost);
+      }
+      relocateInteractionPanelForExecution(container, settings);
+      relocateTaskTrackerForExecution(container, settings);
+      return;
+    }
+
+    if (isEditView(settings)) {
+      hideExecutionControlsForEdit(container);
+      if (executionHost) {
+        hideExecutionControlsForEdit(executionHost);
+        executionHost.classList.remove('is-visible');
+        executionHost.innerHTML = '';
+      }
+    }
+  }
+
+  function installSpecialExecutionMode(container, settings) {
+    var special = settings && settings.specialExecution ? settings.specialExecution : null;
+    if (!special || !toBooleanFlag(special.enabled)) {
+      return;
+    }
+    if (container.__cttSpecialExecutionInstalled) {
+      return;
+    }
+
+    container.__cttSpecialExecutionInstalled = true;
+
+    var panel = ensureSpecialExecutionPanel(container);
+    if (!panel) {
+      return;
+    }
+
+    var returnTo = String(special.returnTo || '').trim();
+    var autoExecute = toBooleanFlag(special.autoExecute);
+    var shouldRedirect = toBooleanFlag(special.redirectOnCompletion) && returnTo !== '';
+    var executionHost = document.getElementById('ctt-execution-interaction-host');
+    var started = false;
+    var completed = false;
+    var redirected = false;
+
+    // Ensure progression controls are visible immediately, even before monitor ticks.
+    function finalizeFromLastTaskAdvance() {
+      if (completed) {
+        return;
+      }
+
+      started = true;
+      setSpecialExecutionStatus(panel, 'All tasks completed. Finalizing execution...', 'running');
+
+      var stopButton = findButtonByLabels(executionHost || container, [
+        'stop simulation',
+        'stop execution',
+        'end simulation',
+        'finish simulation',
+        'complete execution',
+        'stop',
+        'run test',
+      ]);
+
+      if (stopButton && !stopButton.disabled && stopButton.getAttribute('aria-disabled') !== 'true') {
+        stopButton.click();
+      }
+
+      window.setTimeout(function () {
+        monitorExecutionState();
+      }, 220);
+
+      // Fallback: if upstream completion signals do not appear, still finish user flow.
+      window.setTimeout(function () {
+        if (!completed) {
+          markCompleted();
+        }
+      }, 2500);
+    }
+
+    installTaskProgressNavigator(panel, container, {
+      onLastTaskAdvance: finalizeFromLastTaskAdvance,
+    });
+    if (panel.__cttTaskNavUpdate) {
+      panel.__cttTaskNavUpdate();
+    }
+
+    function markCompleted() {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      setSpecialExecutionStatus(panel, 'Execution completed. Returning to Process Executions...', 'success');
+
+      // Keep completion UX outside the canvas and then navigate back.
+      container.style.display = 'none';
+      container.setAttribute('aria-hidden', 'true');
+
+      if (!shouldRedirect || redirected) {
+        return;
+      }
+
+      redirected = true;
+      window.setTimeout(function () {
+        window.location.assign(returnTo);
+      }, 900);
+    }
+
+    function tryAutoStart() {
+      if (!autoExecute || started) {
+        return;
+      }
+
+      var startButton = findButtonByLabels(container, [
+        'start simulation',
+        'start execution',
+        'run simulation',
+        'run workflow',
+        'run test',
+        'run',
+      ]);
+
+      if (!startButton && executionHost) {
+        startButton = findButtonByLabels(executionHost, [
+          'start simulation',
+          'start execution',
+          'run simulation',
+          'run workflow',
+          'run test',
+          'run',
+        ]);
+      }
+
+      if (!startButton) {
+        setSpecialExecutionStatus(panel, 'Waiting for execution controls...', 'neutral');
+        return;
+      }
+
+      if (startButton.disabled || startButton.getAttribute('aria-disabled') === 'true') {
+        setSpecialExecutionStatus(panel, 'Execution controls loaded. Waiting for workflow readiness...', 'neutral');
+        return;
+      }
+
+      started = true;
+      setSpecialExecutionStatus(panel, 'Execution started...', 'running');
+      hideStartOverlayNearControl(startButton);
+      startButton.click();
+    }
+
+    function monitorExecutionState() {
+      if (completed) {
+        return;
+      }
+
+      installTaskProgressNavigator(panel, container, {
+        onLastTaskAdvance: finalizeFromLastTaskAdvance,
+      });
+      if (panel.__cttTaskNavUpdate) {
+        panel.__cttTaskNavUpdate();
+      }
+
+      tryAutoStart();
+
+      var runningNode = findNodeByText(container, ['running', 'starting simulation']);
+      if (runningNode && started) {
+        setSpecialExecutionStatus(panel, 'Execution running...', 'running');
+      }
+
+      var runSummaryNode = findNodeByText(document.body, ['run summary']);
+      if (runSummaryNode) {
+        var summaryOverlay = runSummaryNode.closest('div');
+        if (summaryOverlay && summaryOverlay !== panel && summaryOverlay.style) {
+          summaryOverlay.style.display = 'none';
+          summaryOverlay.setAttribute('aria-hidden', 'true');
+        }
+        markCompleted();
+        return;
+      }
+
+      var completionScope = executionHost || container;
+      var completionText = String(completionScope && completionScope.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+      var hasExplicitCompletedStatus = /(execution|status)\s*[:\-]?\s*(done|completed)\b/.test(completionText);
+      var hasStableCompletionCounters = /\bcompleted\b\s*[:\-]?\s*[1-9]\d*\b/.test(completionText)
+        && /\bactive\b\s*[:\-]?\s*0\b/.test(completionText)
+        && !/\b(paused|running)\b/.test(completionText);
+
+      if (started && (hasExplicitCompletedStatus || hasStableCompletionCounters)) {
+        markCompleted();
+        return;
+      }
+
+      var doneNode = findNodeByText(container, [' completed ', ' done ']);
+      if (doneNode && started) {
+        markCompleted();
+      }
+    }
+
+    setSpecialExecutionStatus(panel, autoExecute ? 'Waiting to start execution...' : 'Execution panel ready.', 'neutral');
+
+    var monitorScheduled = false;
+    function scheduleMonitorExecutionState() {
+      if (monitorScheduled) {
+        return;
+      }
+      monitorScheduled = true;
+      window.setTimeout(function () {
+        monitorScheduled = false;
+        monitorExecutionState();
+      }, 120);
+    }
+
+    var observer = new MutationObserver(function () {
+      scheduleMonitorExecutionState();
+    });
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      characterData: false,
+    });
+
+    var intervalId = window.setInterval(monitorExecutionState, 500);
+    window.setTimeout(function () {
+      monitorExecutionState();
+    }, 200);
+
+    window.addEventListener('beforeunload', function () {
+      observer.disconnect();
+      window.clearInterval(intervalId);
+    }, { once: true });
+  }
+
   Drupal.behaviors.cttEditorInit = {
     attach: function (context) {
       once('ctt-editor-init', '#ctt-workflow-app', context).forEach(function (container) {
@@ -875,6 +1691,8 @@
 
         installApiBootstrapProbeTimeoutGuard(settings);
         installSubmissionStatusBridge(settings);
+        installSpecialExecutionMode(container, settings);
+        enforceCanvasModeSplit(container, settings);
 
         var maxAttempts = 50;
         var attempt = 0;
@@ -916,6 +1734,36 @@
         window.addEventListener('resize', applyContainerSize, { passive: true });
         setTimeout(applyContainerSize, 50);
         setTimeout(applyContainerSize, 250);
+
+        var splitScheduled = false;
+        function scheduleSplitEnforcement() {
+          if (splitScheduled) {
+            return;
+          }
+          splitScheduled = true;
+          window.setTimeout(function () {
+            splitScheduled = false;
+            enforceCanvasModeSplit(container, settings);
+          }, 140);
+        }
+
+        var splitObserver = new MutationObserver(function () {
+          scheduleSplitEnforcement();
+        });
+        splitObserver.observe(container, {
+          childList: true,
+          subtree: true,
+          characterData: false,
+        });
+
+        var executionHost = document.getElementById('ctt-execution-interaction-host');
+        if (executionHost) {
+          splitObserver.observe(executionHost, {
+            childList: true,
+            subtree: true,
+            characterData: false,
+          });
+        }
 
         // Backup watchdog: if initialization never completes, replace spinner with diagnostics.
         installAbsoluteApiLoopBreaker(container, settings);

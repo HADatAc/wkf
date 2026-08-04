@@ -9,19 +9,19 @@ You now have two access paths:
 1. From Study management (recommended context path)
 - Go to: Study Elements -> Manage Elements -> Manage Studies
 - Open a Study
-- In Associated Workflows, use the action buttons:
-  - View Workflow
-  - Tools Repository
+- In Associated Workflows, use:
+  - Open Workflow
   - R Analysis
   - Start Structured Submission (owner + permission required)
+- Use Manage Tools from the top-level actions to open the analytical tool collection.
 
 2. From main menu shortcuts
-- Study Elements -> Manage Elements -> Workflow Tools Repository
+- Study Elements -> Manage Elements -> Analytical Tool Collection
 - Study Elements -> Manage Elements -> Workflow R Analysis
 
 ## What Each Action Does
 
-### View Workflow
+### Open Workflow
 - Opens the CTT editor directly:
   - /ctt/editor?studyUri={STUDY_URI}&processUri={PROCESS_URI}
 - This is the stable path for workflow canvas visualization/editing.
@@ -31,10 +31,13 @@ You now have two access paths:
   - /ctt/submission/{base64StudyUri}?processUri={PROCESS_URI}
 - Intended for execution/submission flow.
 
-### Tools Repository
-- Opens analytical tools catalog:
-  - /workflow/tools-repository?studyUri={STUDY_URI}
-- Use this to manage metadata for analytical tools and inspect associations.
+### Analytical Tool Collection
+- Opens process-based analytical tool collection:
+  - /workflow/tools-repository?processUri={PROCESS_URI}
+- Tool metadata is process-scoped.
+- Add/edit is on a separate editor page (opened from Add Tool or Edit).
+- Only the tool owner can update or remove a tool.
+- Deletion is blocked when the tool has execution usage with derived datasets.
 
 ### R Analysis
 - Opens R analysis page prefilled with context:

@@ -20,6 +20,9 @@ use Drupal\rep\Utils;
  */
 class CttApiController extends ControllerBase {
 
+  private const PMSR_ADMIN_OWNER_EMAIL = 'admin@pmsr.com';
+  private const ANY_PROCESS_URI = 'http://hadatac.org/ont/hasco/AnyProcess';
+
   /**
    * @var \Drupal\ctt\Service\CttHascoClient
    */
@@ -424,6 +427,176 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Validate WKF task hierarchy semantics required by WKF-SPEC-V2.
+   *
+   * Rules enforced:
+   * - Exactly one top-level task (no supertask) in the process task collection.
+   * - Every non-top task is a direct or indirect descendant of that top task.
+   * - Process hasTopTask matches the unique top-level task.
+   */
+  protected function validateProcessTaskHierarchy(string $processUri): array {
+    $issues = [];
+    if (!$this->isUri($processUri)) {
+      return $issues;
+    }
+
+    try {
+      $processEntity = $this->hascoClient->getByUri($processUri);
+      $tasks = $this->hascoClient->getTasksByProcess($processUri);
+
+      if (!is_array($tasks) || empty($tasks)) {
+        $issues[] = $this->buildValidationIssue(
+          'tasks',
+          'missing_tasks_for_process',
+          'Process has no retrievable task collection for hierarchy validation.'
+        );
+        return $issues;
+      }
+
+      $taskUris = [];
+      $parentByChild = [];
+      $childrenByParent = [];
+
+      foreach ($tasks as $task) {
+        if (!is_array($task)) {
+          continue;
+        }
+
+        $taskUri = trim((string) ($task['uri'] ?? $task['hasURI'] ?? ''));
+        if (!$this->isUri($taskUri)) {
+          continue;
+        }
+        $taskUris[$taskUri] = TRUE;
+
+        $supertaskUri = trim((string) ($task['hasSupertaskUri'] ?? $task['supertaskUri'] ?? $task['hasSupertask'] ?? ''));
+        if ($this->isUri($supertaskUri)) {
+          $parentByChild[$taskUri] = $supertaskUri;
+          if (!isset($childrenByParent[$supertaskUri])) {
+            $childrenByParent[$supertaskUri] = [];
+          }
+          $childrenByParent[$supertaskUri][$taskUri] = TRUE;
+        }
+
+        $subtaskRefs = $task['hasSubtaskUris'] ?? $task['subtaskUris'] ?? $task['hasSubtask'] ?? [];
+        if (is_string($subtaskRefs)) {
+          $subtaskRefs = [$subtaskRefs];
+        }
+        if (is_array($subtaskRefs)) {
+          foreach ($subtaskRefs as $subtaskRef) {
+            $subtaskUri = '';
+            if (is_string($subtaskRef)) {
+              $subtaskUri = trim($subtaskRef);
+            }
+            elseif (is_array($subtaskRef)) {
+              $subtaskUri = trim((string) ($subtaskRef['uri'] ?? $subtaskRef['hasURI'] ?? $subtaskRef['taskUri'] ?? ''));
+            }
+            elseif (is_object($subtaskRef)) {
+              $subtaskUri = trim((string) ($subtaskRef->uri ?? $subtaskRef->hasURI ?? $subtaskRef->taskUri ?? ''));
+            }
+
+            if ($this->isUri($subtaskUri)) {
+              $taskUris[$subtaskUri] = TRUE;
+              if (!isset($childrenByParent[$taskUri])) {
+                $childrenByParent[$taskUri] = [];
+              }
+              $childrenByParent[$taskUri][$subtaskUri] = TRUE;
+              if (!isset($parentByChild[$subtaskUri])) {
+                $parentByChild[$subtaskUri] = $taskUri;
+              }
+            }
+          }
+        }
+      }
+
+      if (empty($taskUris)) {
+        $issues[] = $this->buildValidationIssue(
+          'tasks',
+          'missing_task_uris',
+          'Process task collection did not contain valid task URIs.'
+        );
+        return $issues;
+      }
+
+      $roots = [];
+      foreach (array_keys($taskUris) as $taskUri) {
+        $parentUri = trim((string) ($parentByChild[$taskUri] ?? ''));
+        if ($parentUri === '' || !isset($taskUris[$parentUri])) {
+          $roots[] = $taskUri;
+        }
+      }
+
+      if (count($roots) !== 1) {
+        $issues[] = $this->buildValidationIssue(
+          'tasks',
+          'invalid_top_level_task_count',
+          sprintf('Expected exactly 1 top-level task, found %d.', count($roots))
+        );
+      }
+
+      $topTaskUri = count($roots) === 1 ? $roots[0] : '';
+
+      $processTopTaskUri = '';
+      if (is_array($processEntity)) {
+        $processTopTaskUri = trim((string) ($processEntity['hasTopTaskUri'] ?? $processEntity['hasTopTask'] ?? ''));
+      }
+      elseif (is_object($processEntity)) {
+        $processTopTaskUri = trim((string) ($processEntity->hasTopTaskUri ?? $processEntity->hasTopTask ?? ''));
+      }
+
+      if ($topTaskUri !== '' && $this->isUri($processTopTaskUri) && $processTopTaskUri !== $topTaskUri) {
+        $issues[] = $this->buildValidationIssue(
+          'processUri',
+          'process_top_task_mismatch',
+          'Process hasTopTask does not match the unique top-level task in task collection.'
+        );
+      }
+
+      if ($topTaskUri !== '') {
+        $visited = [];
+        $stack = [$topTaskUri];
+        while (!empty($stack)) {
+          $current = array_pop($stack);
+          if (isset($visited[$current])) {
+            continue;
+          }
+          $visited[$current] = TRUE;
+          $children = array_keys($childrenByParent[$current] ?? []);
+          foreach ($children as $childUri) {
+            if (!isset($visited[$childUri])) {
+              $stack[] = $childUri;
+            }
+          }
+        }
+
+        $orphans = [];
+        foreach (array_keys($taskUris) as $taskUri) {
+          if (!isset($visited[$taskUri])) {
+            $orphans[] = $taskUri;
+          }
+        }
+
+        if (!empty($orphans)) {
+          $issues[] = $this->buildValidationIssue(
+            'tasks',
+            'task_hierarchy_disconnected',
+            'Found tasks that are not direct or indirect descendants of the unique top-level task.'
+          );
+        }
+      }
+    }
+    catch (\Throwable $e) {
+      $issues[] = $this->buildValidationIssue(
+        'tasks',
+        'task_hierarchy_validation_error',
+        'Unable to validate process task hierarchy: ' . $e->getMessage(),
+        'warning'
+      );
+    }
+
+    return $issues;
+  }
+
+  /**
    * Resolve current authenticated user email (empty for anonymous/CLI contexts).
    */
   protected function getCurrentUserEmail(): string {
@@ -702,6 +875,43 @@ class CttApiController extends ControllerBase {
     foreach (array_unique($candidates) as $candidate) {
       if ($candidate === $normalizedOwner) {
         return TRUE;
+      }
+    }
+
+    return FALSE;
+  }
+
+  /**
+   * Check if current user has PMSR administration role.
+   */
+  protected function currentUserHasPmsrAdministrationRole(): bool {
+    $account = $this->currentUser();
+    if (!method_exists($account, 'getRoles')) {
+      return FALSE;
+    }
+
+    $roles = $account->getRoles();
+    if (!is_array($roles)) {
+      return FALSE;
+    }
+
+    foreach ($roles as $roleId) {
+      $normalizedRole = strtolower(trim((string) $roleId));
+      if ($normalizedRole === 'pmsr_administration' || $normalizedRole === 'pmsr_admin') {
+        return TRUE;
+      }
+
+      try {
+        $roleEntity = \Drupal\user\Entity\Role::load((string) $roleId);
+        if ($roleEntity) {
+          $roleLabel = strtolower(trim((string) $roleEntity->label()));
+          if ($roleLabel === 'pmsr administration' || str_contains($roleLabel, 'pmsr admin')) {
+            return TRUE;
+          }
+        }
+      }
+      catch (\Throwable $ignored) {
+        // Keep role-id based checks as fallback.
       }
     }
 
@@ -1792,6 +2002,14 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Determine whether a process URI value is the global wildcard.
+   */
+  protected function isGlobalProcessWildcard(string $value): bool {
+    $normalized = trim($value);
+    return $normalized === '*' || strcasecmp($normalized, self::ANY_PROCESS_URI) === 0;
+  }
+
+  /**
    * Allowed script artifact extensions for metadata validation.
    *
    * @return array<int, string>
@@ -1869,6 +2087,264 @@ class CttApiController extends ControllerBase {
   protected function saveAnalyticalToolsCatalog(array $catalog): void {
     ksort($catalog);
     \Drupal::state()->set($this->getAnalyticalToolsCatalogKey(), $catalog);
+  }
+
+  /**
+   * State key for analytical tool execution usage snapshots.
+   */
+  protected function getAnalyticalToolUsageKey(): string {
+    return 'ctt.analytical_tools.usage.v1';
+  }
+
+  /**
+   * Load analytical tool usage registry.
+   *
+   * @return array<string, array<string, mixed>>
+   */
+  protected function loadAnalyticalToolUsageRegistry(): array {
+    $raw = \Drupal::state()->get($this->getAnalyticalToolUsageKey());
+    if (!is_array($raw)) {
+      return [];
+    }
+
+    $normalized = [];
+    foreach ($raw as $toolUri => $snapshot) {
+      $normalizedToolUri = trim((string) $toolUri);
+      if ($normalizedToolUri === '' || !$this->isUri($normalizedToolUri) || !is_array($snapshot)) {
+        continue;
+      }
+
+      $normalized[$normalizedToolUri] = $snapshot;
+    }
+
+    return $normalized;
+  }
+
+  /**
+   * Persist analytical tool usage registry.
+   *
+   * @param array<string, array<string, mixed>> $registry
+   */
+  protected function saveAnalyticalToolUsageRegistry(array $registry): void {
+    ksort($registry);
+    \Drupal::state()->set($this->getAnalyticalToolUsageKey(), $registry);
+  }
+
+  /**
+   * Normalize a list of URI candidates.
+   *
+   * @param array<int, mixed> $values
+   * @return array<int, string>
+   */
+  protected function normalizeUriList(array $values): array {
+    $normalized = [];
+    foreach ($values as $value) {
+      $candidate = trim((string) $value);
+      if ($this->isUri($candidate)) {
+        $normalized[$candidate] = $candidate;
+      }
+    }
+
+    return array_values($normalized);
+  }
+
+  /**
+   * Recursively collect URI values from nested arrays/objects.
+   *
+   * @param mixed $value
+   * @param array<int, string> $fieldNames
+   * @return array<int, string>
+   */
+  protected function collectUrisFromStructure($value, array $fieldNames): array {
+    $collected = [];
+
+    if (is_string($value)) {
+      $candidate = trim($value);
+      if ($this->isUri($candidate)) {
+        $collected[] = $candidate;
+      }
+      return $collected;
+    }
+
+    if (is_object($value)) {
+      $value = (array) $value;
+    }
+
+    if (!is_array($value)) {
+      return [];
+    }
+
+    foreach ($fieldNames as $fieldName) {
+      if (!array_key_exists($fieldName, $value)) {
+        continue;
+      }
+
+      $fieldValue = $value[$fieldName];
+      if (is_string($fieldValue)) {
+        $candidate = trim($fieldValue);
+        if ($this->isUri($candidate)) {
+          $collected[] = $candidate;
+        }
+      }
+      elseif (is_array($fieldValue) || is_object($fieldValue)) {
+        foreach ($this->collectUrisFromStructure($fieldValue, $fieldNames) as $uri) {
+          $collected[] = $uri;
+        }
+      }
+    }
+
+    foreach ($value as $item) {
+      if (is_array($item) || is_object($item)) {
+        foreach ($this->collectUrisFromStructure($item, $fieldNames) as $uri) {
+          $collected[] = $uri;
+        }
+      }
+    }
+
+    return $this->normalizeUriList($collected);
+  }
+
+  /**
+   * Record successful analytical tool usage and derived dataset references.
+   */
+  protected function recordAnalyticalToolExecutionUsage(string $toolUri, string $studyUri, string $processUri, array $upstreamPayload = []): void {
+    $normalizedToolUri = trim($toolUri);
+    if (!$this->isUri($normalizedToolUri)) {
+      return;
+    }
+
+    $registry = $this->loadAnalyticalToolUsageRegistry();
+    $existing = isset($registry[$normalizedToolUri]) && is_array($registry[$normalizedToolUri])
+      ? $registry[$normalizedToolUri]
+      : [];
+
+    $derivedDatasetUris = [];
+    if (!empty($upstreamPayload)) {
+      $derivedDatasetUris = $this->collectUrisFromStructure($upstreamPayload, [
+        'derivedDatasetUri',
+        'derivedDatasetUris',
+        'outputDatasetUri',
+        'outputDatasetUris',
+        'datasetUri',
+        'datasetUris',
+      ]);
+    }
+
+    $mergedDerived = $this->normalizeUriList(array_merge(
+      is_array($existing['derivedDatasetUris'] ?? NULL) ? $existing['derivedDatasetUris'] : [],
+      $derivedDatasetUris
+    ));
+
+    $existingRunCount = (int) ($existing['runCount'] ?? 0);
+
+    $registry[$normalizedToolUri] = [
+      'toolUri' => $normalizedToolUri,
+      'runCount' => $existingRunCount + 1,
+      'lastRunAt' => gmdate('c'),
+      'lastStudyUri' => $this->isUri($studyUri) ? $studyUri : (string) ($existing['lastStudyUri'] ?? ''),
+      'lastProcessUri' => $this->isUri($processUri) ? $processUri : (string) ($existing['lastProcessUri'] ?? ''),
+      'derivedDatasetUris' => $mergedDerived,
+      'derivedDatasetCount' => count($mergedDerived),
+    ];
+
+    $this->saveAnalyticalToolUsageRegistry($registry);
+  }
+
+  /**
+   * Resolve usage snapshot for one analytical tool.
+   */
+  protected function getAnalyticalToolUsageSnapshot(string $toolUri): array {
+    $normalizedToolUri = trim($toolUri);
+    if (!$this->isUri($normalizedToolUri)) {
+      return [
+        'runCount' => 0,
+        'derivedDatasetUris' => [],
+        'derivedDatasetCount' => 0,
+      ];
+    }
+
+    $registry = $this->loadAnalyticalToolUsageRegistry();
+    $snapshot = isset($registry[$normalizedToolUri]) && is_array($registry[$normalizedToolUri])
+      ? $registry[$normalizedToolUri]
+      : [];
+
+    $derivedDatasetUris = $this->normalizeUriList(is_array($snapshot['derivedDatasetUris'] ?? NULL) ? $snapshot['derivedDatasetUris'] : []);
+
+    return [
+      'runCount' => (int) ($snapshot['runCount'] ?? 0),
+      'lastRunAt' => (string) ($snapshot['lastRunAt'] ?? ''),
+      'lastStudyUri' => (string) ($snapshot['lastStudyUri'] ?? ''),
+      'lastProcessUri' => (string) ($snapshot['lastProcessUri'] ?? ''),
+      'derivedDatasetUris' => $derivedDatasetUris,
+      'derivedDatasetCount' => count($derivedDatasetUris),
+    ];
+  }
+
+  /**
+   * Determine whether current user can mutate one analytical tool entry.
+   */
+  protected function canCurrentUserMutateTool(array $tool): bool {
+    if ((string) $this->currentUser()->id() === '0') {
+      return TRUE;
+    }
+
+    $ownerIdentifier = trim((string) ($tool['ownerUserEmail'] ?? ''));
+    if ($ownerIdentifier === '') {
+      $ownerIdentifier = trim((string) ($tool['createdBy'] ?? ''));
+    }
+
+    if ($ownerIdentifier === '') {
+      return FALSE;
+    }
+
+    if (strtolower($ownerIdentifier) === self::PMSR_ADMIN_OWNER_EMAIL
+      && $this->currentUserHasPmsrAdministrationRole()
+    ) {
+      return TRUE;
+    }
+
+    return $this->ownerIdentifierMatchesCurrentUser($ownerIdentifier);
+  }
+
+  /**
+   * Build a consistent owner-required response for analytical tool mutations.
+   */
+  protected function buildToolOwnerRequiredResponse(string $toolUri, string $reasonCode): JsonResponse {
+    $message = 'Only the analytical tool owner can update or remove this tool.';
+    if ($reasonCode === 'tool_owner_unresolved') {
+      $message = 'Analytical tool owner could not be resolved. Mutation is blocked for safety.';
+    }
+
+    $issue = $this->buildValidationIssue('toolUri', $reasonCode, $message);
+
+    return new JsonResponse([
+      'isValid' => FALSE,
+      'updated' => FALSE,
+      'issues' => [$issue],
+      'summary' => [
+        'errorCount' => 1,
+        'warningCount' => 0,
+      ],
+      'toolUri' => $toolUri,
+    ], 403);
+  }
+
+  /**
+   * Enforce tool owner for mutation operations.
+   */
+  protected function enforceToolOwnerForMutation(array $tool): ?JsonResponse {
+    $toolUri = trim((string) ($tool['toolUri'] ?? ''));
+    $ownerIdentifier = trim((string) ($tool['ownerUserEmail'] ?? $tool['createdBy'] ?? ''));
+
+    if ($ownerIdentifier === '') {
+      return $this->buildToolOwnerRequiredResponse($toolUri, 'tool_owner_unresolved');
+    }
+
+    if (!$this->canCurrentUserMutateTool($tool)) {
+      return $this->buildToolOwnerRequiredResponse($toolUri, 'workflow_owner_required');
+    }
+
+    return NULL;
   }
 
   /**
@@ -2096,6 +2572,8 @@ class CttApiController extends ControllerBase {
     $issues = [];
 
     $toolUri = trim((string) ($payload['toolUri'] ?? ($existing['toolUri'] ?? '')));
+    $processUri = trim((string) ($payload['processUri'] ?? ($existing['processUri'] ?? '')));
+    $ownerPersonUri = trim((string) ($payload['ownerPersonUri'] ?? ($existing['ownerPersonUri'] ?? '')));
     $name = trim((string) ($payload['name'] ?? ($existing['name'] ?? '')));
     $version = trim((string) ($payload['version'] ?? ($existing['version'] ?? '')));
     $language = trim((string) ($payload['language'] ?? ($existing['language'] ?? '')));
@@ -2125,6 +2603,19 @@ class CttApiController extends ControllerBase {
 
     if ($name === '') {
       $issues[] = $this->buildValidationIssue('name', 'missing_tool_name', 'Analytical tool name is required.');
+    }
+
+    $isWildcardProcess = $this->isGlobalProcessWildcard($processUri);
+
+    if ($processUri === '') {
+      $issues[] = $this->buildValidationIssue('processUri', 'missing_process_uri', 'Process URI is required for analytical tools collection entries.');
+    }
+    elseif (!$isWildcardProcess && !$this->isUri($processUri)) {
+      $issues[] = $this->buildValidationIssue('processUri', 'invalid_process_uri', 'Process URI must be a valid HTTP(S) URI or "*" for global tools.');
+    }
+
+    if ($ownerPersonUri !== '' && !$this->isUri($ownerPersonUri)) {
+      $issues[] = $this->buildValidationIssue('ownerPersonUri', 'invalid_owner_person_uri', 'Owner Person URI must be a valid HTTP(S) URI.');
     }
 
     if ($toolUri === '') {
@@ -2176,10 +2667,17 @@ class CttApiController extends ControllerBase {
 
     $account = $this->currentUser();
     $updatedBy = (string) $account->getDisplayName();
+    $ownerUserEmail = trim((string) ($existing['ownerUserEmail'] ?? ''));
+    if ($ownerUserEmail === '') {
+      $ownerUserEmail = $this->getCurrentUserEmail();
+    }
     try {
       $user = \Drupal\user\Entity\User::load($account->id());
       if ($user && is_string($user->getEmail()) && trim($user->getEmail()) !== '') {
         $updatedBy = trim((string) $user->getEmail());
+        if ($ownerUserEmail === '') {
+          $ownerUserEmail = $updatedBy;
+        }
       }
     }
     catch (\Throwable $ignored) {
@@ -2188,6 +2686,11 @@ class CttApiController extends ControllerBase {
 
     $tool = [
       'toolUri' => $toolUri,
+      'processUri' => $processUri,
+      'processScope' => $isWildcardProcess ? 'all' : 'specific',
+      'isProcessWildcard' => $isWildcardProcess,
+      'ownerUserEmail' => $ownerUserEmail,
+      'ownerPersonUri' => $ownerPersonUri,
       'name' => $name,
       'version' => $version,
       'language' => $language,
@@ -2243,6 +2746,102 @@ class CttApiController extends ControllerBase {
       return 60;
     }
     return $timeout;
+  }
+
+  /**
+   * Resolve local state key used to persist R analysis run history for one study.
+   */
+  protected function getRAnalysisRunHistoryKey(string $studyUri): string {
+    return 'ctt.r_analysis_runs.' . sha1($studyUri);
+  }
+
+  /**
+   * Load persisted R analysis run history for one study.
+   *
+   * @return array<int, array<string, mixed>>
+   */
+  protected function loadRAnalysisRunHistory(string $studyUri): array {
+    $history = \Drupal::state()->get($this->getRAnalysisRunHistoryKey($studyUri), []);
+    return is_array($history) ? $history : [];
+  }
+
+  /**
+   * Persist R analysis run history with a bounded list size.
+   *
+   * @param array<int, array<string, mixed>> $history
+   */
+  protected function saveRAnalysisRunHistory(string $studyUri, array $history): void {
+    if (count($history) > 100) {
+      $history = array_slice($history, 0, 100);
+    }
+    \Drupal::state()->set($this->getRAnalysisRunHistoryKey($studyUri), array_values($history));
+  }
+
+  /**
+   * Extract first URI value from known result fields in upstream payload.
+   */
+  protected function extractResultUriFromUpstreamPayload($upstreamPayload): string {
+    if (!is_array($upstreamPayload) && !is_object($upstreamPayload)) {
+      return '';
+    }
+
+    $uris = $this->collectUrisFromStructure($upstreamPayload, [
+      'resultUri',
+      'resultUris',
+      'derivedDatasetUri',
+      'derivedDatasetUris',
+      'outputDatasetUri',
+      'outputDatasetUris',
+      'datasetUri',
+      'datasetUris',
+      'dataFileUri',
+      'datafileUri',
+      'uri',
+    ]);
+
+    return !empty($uris) ? (string) reset($uris) : '';
+  }
+
+  /**
+   * Find one run index in history by runId, or by latest match for study/process/tool.
+   *
+   * @param array<int, array<string, mixed>> $history
+   */
+  protected function findRunHistoryIndex(array $history, string $runId, string $processUri, string $toolUri): int {
+    if ($runId !== '') {
+      foreach ($history as $index => $entry) {
+        if (!is_array($entry)) {
+          continue;
+        }
+        if (trim((string) ($entry['runId'] ?? '')) === $runId) {
+          return (int) $index;
+        }
+      }
+      return -1;
+    }
+
+    foreach ($history as $index => $entry) {
+      if (!is_array($entry)) {
+        continue;
+      }
+
+      $entryProcess = trim((string) ($entry['processUri'] ?? ''));
+      $entryTool = trim((string) ($entry['toolUri'] ?? ''));
+      $entryStatus = strtolower(trim((string) ($entry['status'] ?? '')));
+
+      if ($processUri !== '' && $entryProcess !== $processUri) {
+        continue;
+      }
+      if ($toolUri !== '' && $entryTool !== $toolUri) {
+        continue;
+      }
+
+      if (in_array($entryStatus, ['running', 'queued'], TRUE)) {
+        return (int) $index;
+      }
+    }
+
+    return -1;
   }
 
   /**
@@ -3676,6 +4275,25 @@ class CttApiController extends ControllerBase {
       ]);
     }
 
+    $runId = 'RA' . strtoupper(substr(sha1($studyUri . '|' . $processUri . '|' . $toolUri . '|' . microtime(TRUE)), 0, 12));
+    $startedAt = gmdate('c');
+
+    $history = $this->loadRAnalysisRunHistory($studyUri);
+    array_unshift($history, [
+      'runId' => $runId,
+      'studyUri' => $studyUri,
+      'processUri' => $processUri,
+      'toolUri' => $toolUri,
+      'requestedAt' => $startedAt,
+      'startedAt' => $startedAt,
+      'finishedAt' => '',
+      'status' => 'running',
+      'requestedBy' => $this->getCurrentUserIdentifier(),
+      'backendEndpoint' => $endpointPath,
+      'resultUri' => '',
+    ]);
+    $this->saveRAnalysisRunHistory($studyUri, $history);
+
     try {
       $upstream = $this->hascoClient->proxyRequest('POST', $endpointPath, [
         'json' => $requestPayload,
@@ -3683,26 +4301,20 @@ class CttApiController extends ControllerBase {
         'connect_timeout' => min(10, $timeoutSeconds),
       ]);
 
-      $runId = 'RA' . strtoupper(substr(sha1($studyUri . '|' . $processUri . '|' . $toolUri . '|' . microtime(TRUE)), 0, 12));
-      $historyKey = 'ctt.r_analysis_runs.' . sha1($studyUri);
-      $history = \Drupal::state()->get($historyKey);
-      if (!is_array($history)) {
-        $history = [];
+      $history = $this->loadRAnalysisRunHistory($studyUri);
+      $historyIndex = $this->findRunHistoryIndex($history, $runId, $processUri, $toolUri);
+      if ($historyIndex >= 0) {
+        $resultUri = $this->extractResultUriFromUpstreamPayload($upstream);
+        $history[$historyIndex]['status'] = 'completed';
+        $history[$historyIndex]['finishedAt'] = gmdate('c');
+        $history[$historyIndex]['resultUri'] = $resultUri;
+        $history[$historyIndex]['executionPayload'] = is_array($upstream) ? $upstream : [];
+        $this->saveRAnalysisRunHistory($studyUri, $history);
       }
 
-      array_unshift($history, [
-        'runId' => $runId,
-        'studyUri' => $studyUri,
-        'processUri' => $processUri,
-        'toolUri' => $toolUri,
-        'requestedAt' => gmdate('c'),
-        'requestedBy' => $this->getCurrentUserIdentifier(),
-        'backendEndpoint' => $endpointPath,
-      ]);
-      if (count($history) > 20) {
-        $history = array_slice($history, 0, 20);
-      }
-      \Drupal::state()->set($historyKey, $history);
+      $this->recordAnalyticalToolExecutionUsage($toolUri, $studyUri, $processUri, is_array($upstream) ? $upstream : []);
+
+      $resultUri = $this->extractResultUriFromUpstreamPayload($upstream);
 
       return new JsonResponse([
         'isValid' => TRUE,
@@ -3715,6 +4327,10 @@ class CttApiController extends ControllerBase {
         ],
         'execution' => [
           'runId' => $runId,
+          'startedAt' => $startedAt,
+          'finishedAt' => gmdate('c'),
+          'status' => 'completed',
+          'resultUri' => $resultUri,
           'backendEndpoint' => $endpointPath,
           'timeoutSeconds' => $timeoutSeconds,
         ],
@@ -3749,6 +4365,15 @@ class CttApiController extends ControllerBase {
         }
       }
 
+      $history = $this->loadRAnalysisRunHistory($studyUri);
+      $historyIndex = $this->findRunHistoryIndex($history, $runId, $processUri, $toolUri);
+      if ($historyIndex >= 0) {
+        $history[$historyIndex]['status'] = 'failed';
+        $history[$historyIndex]['finishedAt'] = gmdate('c');
+        $history[$historyIndex]['errorMessage'] = (string) $e->getMessage();
+        $this->saveRAnalysisRunHistory($studyUri, $history);
+      }
+
       return new JsonResponse([
         'isValid' => TRUE,
         'isSuccessful' => FALSE,
@@ -3761,10 +4386,93 @@ class CttApiController extends ControllerBase {
         'execution' => [
           'backendEndpoint' => $endpointPath,
           'timeoutSeconds' => $timeoutSeconds,
+          'runId' => $runId,
+          'startedAt' => $startedAt,
+          'finishedAt' => gmdate('c'),
+          'status' => 'failed',
           'upstreamHttpStatus' => $upstreamStatus > 0 ? $upstreamStatus : NULL,
         ],
       ], $backendUnavailable ? 503 : 502);
     }
+  }
+
+  /**
+   * Abort one R analysis run by runId or latest running run for process/tool.
+   */
+  public function abortRAnalysisRun(Request $request) {
+    $payload = [];
+    $rawBody = trim((string) $request->getContent());
+    if ($rawBody !== '') {
+      $decoded = json_decode($rawBody, TRUE);
+      if (is_array($decoded)) {
+        $payload = $decoded;
+      }
+    }
+
+    $query = $request->query->all();
+    $studyUri = trim((string) ($payload['studyUri'] ?? ($query['studyUri'] ?? '')));
+    $processUri = trim((string) ($payload['processUri'] ?? ($query['processUri'] ?? '')));
+    $toolUri = trim((string) ($payload['toolUri'] ?? ($query['toolUri'] ?? '')));
+    $runId = trim((string) ($payload['runId'] ?? ($query['runId'] ?? '')));
+
+    if (!$this->isUri($studyUri)) {
+      return new JsonResponse([
+        'isSuccessful' => FALSE,
+        'issues' => [
+          $this->buildValidationIssue('studyUri', 'missing_or_invalid_study_uri', 'A valid study URI is required.'),
+        ],
+      ], 400);
+    }
+
+    $history = $this->loadRAnalysisRunHistory($studyUri);
+    if (empty($history)) {
+      return new JsonResponse([
+        'isSuccessful' => FALSE,
+        'issues' => [
+          $this->buildValidationIssue('run', 'run_not_found', 'No execution runs were found for this study.'),
+        ],
+      ], 404);
+    }
+
+    $historyIndex = $this->findRunHistoryIndex($history, $runId, $processUri, $toolUri);
+    if ($historyIndex < 0 || !isset($history[$historyIndex]) || !is_array($history[$historyIndex])) {
+      return new JsonResponse([
+        'isSuccessful' => FALSE,
+        'issues' => [
+          $this->buildValidationIssue('run', 'run_not_found', 'No matching running execution was found.'),
+        ],
+      ], 404);
+    }
+
+    $run = $history[$historyIndex];
+    $status = strtolower(trim((string) ($run['status'] ?? '')));
+    if (!in_array($status, ['running', 'queued'], TRUE)) {
+      return new JsonResponse([
+        'isSuccessful' => FALSE,
+        'issues' => [
+          $this->buildValidationIssue('run', 'run_not_abortable', 'Run is not in an abortable state.'),
+        ],
+        'execution' => [
+          'runId' => (string) ($run['runId'] ?? ''),
+          'status' => (string) ($run['status'] ?? ''),
+        ],
+      ], 409);
+    }
+
+    $history[$historyIndex]['status'] = 'aborted';
+    $history[$historyIndex]['finishedAt'] = gmdate('c');
+    $history[$historyIndex]['abortedAt'] = (string) $history[$historyIndex]['finishedAt'];
+    $history[$historyIndex]['abortedBy'] = $this->getCurrentUserIdentifier();
+    $this->saveRAnalysisRunHistory($studyUri, $history);
+
+    return new JsonResponse([
+      'isSuccessful' => TRUE,
+      'execution' => [
+        'runId' => (string) ($history[$historyIndex]['runId'] ?? ''),
+        'status' => 'aborted',
+        'abortedAt' => (string) ($history[$historyIndex]['abortedAt'] ?? ''),
+      ],
+    ]);
   }
 
   /**
@@ -3776,11 +4484,8 @@ class CttApiController extends ControllerBase {
    * Upsert mode:
    *  - POST JSON body, or
    *  - GET with action=upsert and tool fields in query params.
-    *
-    * Association mode:
-    *  - POST/GET with action=associate|dissociate and toolUri + studyUri.
-    *
-    * Remove mode:
+  *
+  * Remove mode:
     *  - POST/GET with action=remove and toolUri.
    */
   public function analyticalToolsRepository(Request $request) {
@@ -3805,7 +4510,7 @@ class CttApiController extends ControllerBase {
     $catalog = $this->loadAnalyticalToolsCatalog();
 
     $writeAction = '';
-    if (in_array($action, ['upsert', 'associate', 'dissociate', 'remove'], TRUE)) {
+    if (in_array($action, ['upsert', 'remove'], TRUE)) {
       $writeAction = $action;
     }
     elseif ($request->isMethod('POST')) {
@@ -3813,64 +4518,14 @@ class CttApiController extends ControllerBase {
       $writeAction = 'upsert';
     }
 
-    if ($writeAction === 'associate' || $writeAction === 'dissociate') {
-      $toolUri = trim((string) ($payload['toolUri'] ?? ($query['toolUri'] ?? '')));
-      $studyUri = trim((string) ($payload['studyUri'] ?? ($query['studyUri'] ?? '')));
-
-      if ($toolUri === '' || !$this->isUri($toolUri)) {
-        return new JsonResponse([
-          'isSuccessful' => FALSE,
-          'issues' => [
-            $this->buildValidationIssue('toolUri', 'missing_or_invalid_tool_uri', 'Tool URI must be a valid HTTP(S) URI.'),
-          ],
-        ], 400);
-      }
-
-      if (!isset($catalog[$toolUri])) {
-        return new JsonResponse([
-          'isSuccessful' => FALSE,
-          'issues' => [
-            $this->buildValidationIssue('toolUri', 'tool_not_found', 'Tool URI was not found in the analytical tools catalog.'),
-          ],
-        ], 404);
-      }
-
-      if ($studyUri === '' || !$this->isUri($studyUri)) {
-        return new JsonResponse([
-          'isSuccessful' => FALSE,
-          'issues' => [
-            $this->buildValidationIssue('studyUri', 'missing_or_invalid_study_uri', 'Study URI must be a valid HTTP(S) URI.'),
-          ],
-        ], 400);
-      }
-
-      $studyToolUris = $this->loadStudyToolUris($studyUri);
-      $wasAssociated = in_array($toolUri, $studyToolUris, TRUE);
-
-      if ($writeAction === 'associate' && !$wasAssociated) {
-        $studyToolUris[] = $toolUri;
-      }
-      elseif ($writeAction === 'dissociate' && $wasAssociated) {
-        $studyToolUris = array_values(array_filter($studyToolUris, function ($uri) use ($toolUri) {
-          return trim((string) $uri) !== $toolUri;
-        }));
-      }
-
-      $studyToolUris = array_values(array_unique($studyToolUris));
-      $this->saveStudyToolUris($studyUri, $studyToolUris);
-
+    if ($action === 'associate' || $action === 'dissociate') {
       return new JsonResponse([
-        'isSuccessful' => TRUE,
-        'updated' => $writeAction === 'associate' ? !$wasAssociated : $wasAssociated,
-        'action' => $writeAction,
-        'tool' => $catalog[$toolUri],
-        'studyAssociation' => [
-          'studyUri' => $studyUri,
-          'associatedToolUris' => $studyToolUris,
-          'associatedToolCount' => count($studyToolUris),
+        'isSuccessful' => FALSE,
+        'updated' => FALSE,
+        'issues' => [
+          $this->buildValidationIssue('action', 'deprecated_association_action', 'associate/dissociate actions were removed. Tools are now process-scoped.'),
         ],
-        'issues' => [],
-      ]);
+      ], 400);
     }
 
     if ($writeAction === 'remove') {
@@ -3893,9 +4548,39 @@ class CttApiController extends ControllerBase {
         ], 404);
       }
 
+      $ownerGuard = $this->enforceToolOwnerForMutation($catalog[$toolUri]);
+      if ($ownerGuard instanceof JsonResponse) {
+        return $ownerGuard;
+      }
+
+      $usageSnapshot = $this->getAnalyticalToolUsageSnapshot($toolUri);
+      $runCount = (int) ($usageSnapshot['runCount'] ?? 0);
+      $derivedDatasetCount = (int) ($usageSnapshot['derivedDatasetCount'] ?? 0);
+
+      if ($runCount > 0 && $derivedDatasetCount > 0) {
+        return new JsonResponse([
+          'isSuccessful' => FALSE,
+          'updated' => FALSE,
+          'issues' => [
+            $this->buildValidationIssue(
+              'toolUri',
+              'tool_in_use_with_derived_datasets',
+              'Tool cannot be deleted because it has execution usage and derived datasets exist.'
+            ),
+          ],
+          'usage' => $usageSnapshot,
+        ], 409);
+      }
+
       $removedTool = $catalog[$toolUri];
       unset($catalog[$toolUri]);
       $this->saveAnalyticalToolsCatalog($catalog);
+
+      $usageRegistry = $this->loadAnalyticalToolUsageRegistry();
+      if (isset($usageRegistry[$toolUri])) {
+        unset($usageRegistry[$toolUri]);
+        $this->saveAnalyticalToolUsageRegistry($usageRegistry);
+      }
 
       $associationStatesUpdated = $this->removeToolFromAllStudyToolAssociations($toolUri);
 
@@ -3907,6 +4592,7 @@ class CttApiController extends ControllerBase {
         'removedTool' => $removedTool,
         'catalogSize' => count($catalog),
         'associationStatesUpdated' => $associationStatesUpdated,
+        'usage' => $usageSnapshot,
         'issues' => [],
       ]);
     }
@@ -3917,6 +4603,8 @@ class CttApiController extends ControllerBase {
       $q = strtolower(trim((string) ($query['q'] ?? '')));
       $statusFilter = strtolower(trim((string) ($query['status'] ?? '')));
       $languageFilter = strtolower(trim((string) ($query['language'] ?? '')));
+      $ownerFilter = strtolower(trim((string) ($query['owner'] ?? '')));
+      $processUriFilter = trim((string) ($query['processUri'] ?? ''));
       $authorFilter = strtolower(trim((string) ($query['author'] ?? '')));
       $institutionFilter = strtolower(trim((string) ($query['institution'] ?? '')));
       $scenarioUriFilter = strtolower(trim((string) ($query['scenarioUri'] ?? '')));
@@ -3924,7 +4612,15 @@ class CttApiController extends ControllerBase {
       $dateFromFilter = trim((string) ($query['dateFrom'] ?? ''));
       $dateToFilter = trim((string) ($query['dateTo'] ?? ''));
       $tagFilter = strtolower(trim((string) ($query['tag'] ?? '')));
-      $studyUri = trim((string) ($query['studyUri'] ?? ''));
+
+      if ($processUriFilter !== '' && !$this->isUri($processUriFilter)) {
+        return new JsonResponse([
+          'isSuccessful' => FALSE,
+          'issues' => [
+            $this->buildValidationIssue('processUri', 'missing_or_invalid_process_uri', 'Process URI must be a valid HTTP(S) URI.'),
+          ],
+        ], 400);
+      }
 
       if ($dateFromFilter !== '' && !$this->isIsoDate($dateFromFilter)) {
         return new JsonResponse([
@@ -3944,18 +4640,7 @@ class CttApiController extends ControllerBase {
         ], 400);
       }
 
-      $studyToolUris = [];
-      if ($studyUri !== '') {
-        if (!$this->isUri($studyUri)) {
-          return new JsonResponse([
-            'isSuccessful' => FALSE,
-            'issues' => [
-              $this->buildValidationIssue('studyUri', 'missing_or_invalid_study_uri', 'Study URI must be a valid HTTP(S) URI.'),
-            ],
-          ], 400);
-        }
-        $studyToolUris = $this->loadStudyToolUris($studyUri);
-      }
+      $usageRegistry = $this->loadAnalyticalToolUsageRegistry();
 
       $tools = array_values($catalog);
       usort($tools, function (array $a, array $b): int {
@@ -3973,6 +4658,8 @@ class CttApiController extends ControllerBase {
         $description = (string) ($tool['description'] ?? '');
         $language = strtolower((string) ($tool['language'] ?? ''));
         $status = strtolower((string) ($tool['status'] ?? ''));
+        $ownerEmail = strtolower(trim((string) ($tool['ownerUserEmail'] ?? $tool['createdBy'] ?? '')));
+        $processUri = trim((string) ($tool['processUri'] ?? ''));
         $author = strtolower(trim((string) ($tool['author'] ?? '')));
         $institution = strtolower(trim((string) ($tool['institution'] ?? '')));
         $scenarioUri = strtolower(trim((string) ($tool['scenarioUri'] ?? '')));
@@ -3986,13 +4673,22 @@ class CttApiController extends ControllerBase {
         if ($languageFilter !== '' && $language !== $languageFilter) {
           continue;
         }
+        if ($ownerFilter !== '' && strpos($ownerEmail, $ownerFilter) === FALSE) {
+          continue;
+        }
+        if ($processUriFilter !== ''
+          && strcasecmp($processUri, $processUriFilter) !== 0
+          && !$this->isGlobalProcessWildcard($processUri)) {
+          continue;
+        }
         if ($authorFilter !== '' && strpos($author, $authorFilter) === FALSE) {
           continue;
         }
         if ($institutionFilter !== '' && strpos($institution, $institutionFilter) === FALSE) {
           continue;
         }
-        if ($scenarioUriFilter !== '' && $scenarioUri !== $scenarioUriFilter) {
+        // Treat tools without scenarioUri as globally scoped to any scenario.
+        if ($scenarioUriFilter !== '' && $scenarioUri !== '' && $scenarioUri !== $scenarioUriFilter) {
           continue;
         }
         if ($datasetUriFilter !== '' && $datasetUri !== $datasetUriFilter) {
@@ -4029,6 +4725,8 @@ class CttApiController extends ControllerBase {
         if ($q !== '') {
           $searchBlob = strtolower(implode(' ', [
             (string) ($tool['toolUri'] ?? ''),
+            (string) ($tool['processUri'] ?? ''),
+            (string) ($tool['ownerUserEmail'] ?? ''),
             $name,
             $description,
             $language,
@@ -4046,7 +4744,31 @@ class CttApiController extends ControllerBase {
         }
 
         $tool['tags'] = $tags;
-        $tool['isAssociated'] = ($studyUri !== '') ? in_array((string) ($tool['toolUri'] ?? ''), $studyToolUris, TRUE) : FALSE;
+        $toolUri = trim((string) ($tool['toolUri'] ?? ''));
+        $usage = [];
+        if ($toolUri !== '' && isset($usageRegistry[$toolUri]) && is_array($usageRegistry[$toolUri])) {
+          $usage = $usageRegistry[$toolUri];
+        }
+
+        $derivedDatasetUris = $this->normalizeUriList(is_array($usage['derivedDatasetUris'] ?? NULL) ? $usage['derivedDatasetUris'] : []);
+        $runCount = (int) ($usage['runCount'] ?? 0);
+        $deletionBlocked = $runCount > 0 && count($derivedDatasetUris) > 0;
+
+        $tool['canUpdate'] = $this->canCurrentUserMutateTool($tool);
+        $tool['canDelete'] = $tool['canUpdate'] && !$deletionBlocked;
+        $tool['deletionBlocked'] = $deletionBlocked;
+        $tool['deletionBlockReason'] = $deletionBlocked
+          ? 'Tool has execution usage and derived datasets.'
+          : '';
+        $tool['usage'] = [
+          'runCount' => $runCount,
+          'lastRunAt' => (string) ($usage['lastRunAt'] ?? ''),
+          'lastStudyUri' => (string) ($usage['lastStudyUri'] ?? ''),
+          'lastProcessUri' => (string) ($usage['lastProcessUri'] ?? ''),
+          'derivedDatasetUris' => $derivedDatasetUris,
+          'derivedDatasetCount' => count($derivedDatasetUris),
+        ];
+
         $filtered[] = $tool;
       }
 
@@ -4095,10 +4817,9 @@ class CttApiController extends ControllerBase {
           'statusCounts' => $statusCounts,
           'languageCounts' => $languageCounts,
         ],
-        'study' => [
-          'uri' => $studyUri !== '' ? $studyUri : NULL,
-          'associatedToolUris' => $studyToolUris,
-          'associatedToolCount' => count($studyToolUris),
+        'collection' => [
+          'processUri' => $processUriFilter !== '' ? $processUriFilter : NULL,
+          'owner' => $ownerFilter !== '' ? $ownerFilter : NULL,
         ],
       ]);
     }
@@ -4118,6 +4839,13 @@ class CttApiController extends ControllerBase {
     $existingTool = ($candidateToolUri !== '' && isset($catalog[$candidateToolUri]) && is_array($catalog[$candidateToolUri]))
       ? $catalog[$candidateToolUri]
       : [];
+
+    if (!empty($existingTool)) {
+      $ownerGuard = $this->enforceToolOwnerForMutation($existingTool);
+      if ($ownerGuard instanceof JsonResponse) {
+        return $ownerGuard;
+      }
+    }
 
     $normalized = $this->normalizeAnalyticalToolPayload($input, $existingTool);
     $issues = $normalized['issues'];
@@ -4195,36 +4923,6 @@ class CttApiController extends ControllerBase {
 
     $tool = $catalog[$toolUri];
 
-    $studyUri = trim((string) ($payload['studyUri'] ?? ($query['studyUri'] ?? '')));
-    $studyAssociation = NULL;
-    if ($studyUri !== '') {
-      if (!$this->isUri($studyUri)) {
-        return new JsonResponse([
-          'isValid' => FALSE,
-          'updated' => FALSE,
-          'issues' => [
-            $this->buildValidationIssue('studyUri', 'missing_or_invalid_study_uri', 'Study URI must be a valid HTTP(S) URI.'),
-          ],
-          'summary' => [
-            'errorCount' => 1,
-            'warningCount' => 0,
-          ],
-        ], 400);
-      }
-
-      $studyToolUris = $this->loadStudyToolUris($studyUri);
-      if (!in_array($toolUri, $studyToolUris, TRUE)) {
-        $studyToolUris[] = $toolUri;
-        $this->saveStudyToolUris($studyUri, $studyToolUris);
-      }
-
-      $studyAssociation = [
-        'studyUri' => $studyUri,
-        'associatedToolUris' => $studyToolUris,
-        'associatedToolCount' => count($studyToolUris),
-      ];
-    }
-
     return new JsonResponse([
       'isValid' => TRUE,
       'updated' => TRUE,
@@ -4235,7 +4933,6 @@ class CttApiController extends ControllerBase {
         'lineageUri' => $lineageUri !== '' ? $lineageUri : NULL,
         'autoDeprecatedToolUris' => $autoDeprecatedUris,
       ],
-      'studyAssociation' => $studyAssociation,
       'issues' => [],
       'summary' => [
         'errorCount' => 0,
@@ -4696,6 +5393,9 @@ class CttApiController extends ControllerBase {
       if ($mode === 'submission' && (!is_string($storedProcess) || trim($storedProcess) === '')) {
         $issues[] = $this->buildValidationIssue('processUri', 'study_process_not_associated', 'No process is currently associated with this study.', 'warning');
       }
+
+      // WKF-SPEC-V2 hierarchy checks for process/task coherence.
+      $issues = array_merge($issues, $this->validateProcessTaskHierarchy($processUri));
     }
 
     $storedProcessUri = NULL;

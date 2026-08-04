@@ -306,6 +306,53 @@ final class CttAnalyticalToolsRepositoryApiTest extends BrowserTestBase {
     $this->assertSession()->pageTextContains('Metadata-only: tool scripts are not executed by Drupal.');
   }
 
+  public function testScenarioFilterIncludesToolWithoutScenarioUri(): void {
+    $submitter = $this->createUser(['submit ctt workflow']);
+    $this->drupalLogin($submitter);
+
+    $processUri = 'http://example.org/process/scenario-filter';
+    $toolName = 'Global Scenario Tool';
+
+    $this->drupalGet('/workflow/api/repo/analytical-tools', [
+      'query' => [
+        'action' => 'upsert',
+        'name' => $toolName,
+        'processUri' => $processUri,
+        'language' => 'R',
+        'status' => 'current',
+      ],
+    ]);
+    $this->assertSession()->statusCodeEquals(200);
+
+    $upsertPayload = Json::decode($this->getSession()->getPage()->getContent());
+    $this->assertIsArray($upsertPayload);
+    $this->assertTrue((bool) ($upsertPayload['isValid'] ?? FALSE));
+
+    $toolUri = (string) ($upsertPayload['tool']['toolUri'] ?? '');
+    $this->assertNotSame('', $toolUri);
+
+    $this->drupalGet('/workflow/api/repo/analytical-tools', [
+      'query' => [
+        'processUri' => $processUri,
+        'scenarioUri' => 'http://example.org/scenario/selected',
+      ],
+    ]);
+    $this->assertSession()->statusCodeEquals(200);
+
+    $listPayload = Json::decode($this->getSession()->getPage()->getContent());
+    $this->assertIsArray($listPayload);
+    $this->assertTrue((bool) ($listPayload['isSuccessful'] ?? FALSE));
+
+    $toolUris = [];
+    foreach (($listPayload['body'] ?? []) as $row) {
+      if (is_array($row) && isset($row['toolUri']) && is_string($row['toolUri'])) {
+        $toolUris[] = $row['toolUri'];
+      }
+    }
+
+    $this->assertContains($toolUri, $toolUris);
+  }
+
   /**
    * @param array<int, mixed> $issues
    * @return array<int, string>

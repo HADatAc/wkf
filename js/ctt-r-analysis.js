@@ -466,11 +466,6 @@
     }) : [];
 
     normalized.sort(function (a, b) {
-      const aAssociated = a && a.isAssociated ? 1 : 0;
-      const bAssociated = b && b.isAssociated ? 1 : 0;
-      if (aAssociated !== bAssociated) {
-        return bAssociated - aAssociated;
-      }
       const aName = String(a && a.name || "");
       const bName = String(b && b.name || "");
       return aName.localeCompare(bName);
@@ -489,9 +484,6 @@
       const version = String(tool.version || "").trim();
       if (version !== "") {
         labelParts.push("v" + version);
-      }
-      if (tool.isAssociated) {
-        labelParts.push("associated");
       }
 
       options += '<option value="' + escapeHtml(uri) + '">' + escapeHtml(labelParts.join(" | ")) + "</option>";
@@ -1355,6 +1347,7 @@
     }
 
     const studyUri = normalizeUriInput(state.studyUri && state.studyUri.value || "");
+    const processUri = normalizeUriInput(state.processUri && state.processUri.value || "");
     if (!isHttpUri(studyUri)) {
       setFeedback(state, "warning", "Provide a valid Study selection (name [URI] or URI) before loading context.");
       return;
@@ -1370,7 +1363,9 @@
     try {
       const toolsParams = new URLSearchParams();
       toolsParams.set("language", "R");
-      toolsParams.set("studyUri", studyUri);
+      if (isHttpUri(processUri)) {
+        toolsParams.set("processUri", processUri);
+      }
       toolsParams.set("limit", "200");
       toolsParams.set("offset", "0");
 

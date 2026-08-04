@@ -6,6 +6,8 @@ namespace Drupal\Tests\ctt\Functional;
 
 use Drupal\Component\Serialization\Json;
 use Drupal\Tests\BrowserTestBase;
+use Drupal\ctt\Controller\CttApiController;
+use Drupal\ctt\Service\CttHascoClient;
 
 /**
  * Covers server-side structured submission validation endpoint.
@@ -204,6 +206,65 @@ final class CttSubmissionValidationApiTest extends BrowserTestBase {
       }
     }
     return $codes;
+  }
+
+  public function testTaskHierarchyValidationIssuesAreReported(): void {
+    $submitter = $this->createUser(['submit ctt workflow']);
+    $this->drupalLogin($submitter);
+
+    $studyUri = 'http://example.org/study/validation-hierarchy';
+    $processUri = 'http://example.org/workflow/validation-hierarchy';
+    \Drupal::state()->set('ctt.study_owner_email.' . sha1($studyUri), (string) $submitter->getEmail());
+
+    $fakeProcess = [
+      'uri' => $processUri,
+      'hasTopTaskUri' => 'http://example.org/task/top-A',
+    ];
+
+    // Two roots: top-A and top-B. Also topTask mismatch from process metadata.
+    $fakeTasks = [
+      [
+        'uri' => 'http://example.org/task/top-A',
+        'hasSubtaskUris' => ['http://example.org/task/child-A1'],
+      ],
+      [
+        'uri' => 'http://example.org/task/child-A1',
+        'hasSupertaskUri' => 'http://example.org/task/top-A',
+      ],
+      [
+        'uri' => 'http://example.org/task/top-B',
+      ],
+    ];
+
+    $mock = $this->getMockBuilder(CttHascoClient::class)
+      ->disableOriginalConstructor()
+      ->onlyMethods(['getByUri', 'getTasksByProcess'])
+      ->getMock();
+
+    $mock->method('getByUri')->willReturn($fakeProcess);
+    $mock->method('getTasksByProcess')->willReturn($fakeTasks);
+
+    $controller = CttApiController::create($this->container);
+    $ref = new \ReflectionProperty($controller, 'hascoClient');
+    $ref->setAccessible(TRUE);
+    $ref->setValue($controller, $mock);
+
+    $request = \Symfony\Component\HttpFoundation\Request::create('/workflow/api/submission/validate', 'GET', [
+      'studyUri' => $studyUri,
+      'processUri' => $processUri,
+      'mode' => 'submission',
+      'currentStatus' => 'draft',
+      'requestedStatus' => 'under review',
+      'dataFileUri' => 'http://example.org/datafile/validation-hierarchy-output',
+    ]);
+
+    $response = $controller->validateSubmission($request);
+    $payload = Json::decode((string) $response->getContent());
+    $this->assertIsArray($payload);
+    $this->assertFalse((bool) ($payload['isValid'] ?? TRUE));
+
+    $codes = $this->extractIssueCodes($payload['issues'] ?? []);
+    $this->assertContains('invalid_top_level_task_count', $codes);
   }
 
 }

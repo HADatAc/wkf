@@ -11,7 +11,7 @@ ctt.editor_create:
   weight: 11
 
 ctt.tools_repository:
-  title: 'Analytical Tools Repository'
+  title: 'Analytical Tool Collection'
   route_name: ctt.tools_repository
   parent: system.admin_structure
   weight: 12
@@ -23,7 +23,7 @@ ctt.r_analysis:
   weight: 13
 
 ctt.tools_repository_main:
-  title: 'Workflow Tools Repository'
+  title: 'Analytical Tool Collection'
   route_name: ctt.tools_repository
   parent: std.manage_top_level
   menu_name: main

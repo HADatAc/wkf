@@ -24,9 +24,9 @@ ctt.tools_repository:
   path: '/workflow/tools-repository'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttEditorController::toolsRepositoryPage'
-    _title: 'Analytical Tools Repository'
+    _title: 'Analytical Tool Collection'
   requirements:
-    _permission: 'submit ctt workflow'
+    _user_is_logged_in: 'TRUE'
   options:
     no_cache: TRUE
 
@@ -78,7 +78,7 @@ ctt.api.process.list:
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::listProcesses'
   requirements:
-    _permission: 'access ctt editor'
+    _user_is_logged_in: 'TRUE'
   options:
     no_cache: TRUE
 
@@ -345,7 +345,7 @@ ctt.api.repo.analytical_tools:
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::analyticalToolsRepository'
   requirements:
-    _permission: 'submit ctt workflow'
+    _user_is_logged_in: 'TRUE'
   methods: [GET, POST]
   options:
     no_cache: TRUE
@@ -354,6 +354,16 @@ ctt.api.r_analysis.execute:
   path: '/workflow/api/r-analysis/execute'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::executeRAnalysis'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET, POST]
+  options:
+    no_cache: TRUE
+
+ctt.api.r_analysis.abort:
+  path: '/workflow/api/r-analysis/abort'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::abortRAnalysisRun'
   requirements:
     _permission: 'submit ctt workflow'
   methods: [GET, POST]
