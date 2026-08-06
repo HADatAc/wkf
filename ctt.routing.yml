@@ -464,11 +464,33 @@ ctt.execution_save:
   options:
     no_cache: TRUE
 
+ctt.execution_interrupt:
+  path: '/ctt/execution/interrupted'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttExecutionController::markExecutionInterrupted'
+    _title: 'Mark Execution Interrupted'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [POST]
+  options:
+    no_cache: TRUE
+
 ctt.execution_download:
   path: '/ctt/execution/download'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttExecutionController::downloadDaFile'
     _title: 'Download Execution Output'
+  requirements:
+    _permission: 'submit ctt workflow'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.execution_delete:
+  path: '/ctt/execution/delete'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttExecutionController::deleteExecution'
+    _title: 'Delete Execution Output'
   requirements:
     _permission: 'submit ctt workflow'
   methods: [GET]

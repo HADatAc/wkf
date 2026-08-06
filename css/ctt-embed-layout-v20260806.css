@@ -201,7 +201,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-execution-panel,
-.path-ctt-editor-process .ctt-special-execution-panel {
+.path-ctt-editor-process .ctt-special-execution-panel,
+.path-ctt .ctt-special-execution-panel {
   margin: 0 0 0.5rem 0;
   padding: 0.625rem 0.875rem;
   border: 2px solid #8fb8df;
@@ -212,7 +213,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-execution-panel__title,
-.path-ctt-editor-process .ctt-special-execution-panel__title {
+.path-ctt-editor-process .ctt-special-execution-panel__title,
+.path-ctt .ctt-special-execution-panel__title {
   font-size: 0.875rem;
   font-weight: 600;
   color: #17395a;
@@ -220,24 +222,28 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-execution-panel__status,
-.path-ctt-editor-process .ctt-special-execution-panel__status {
+.path-ctt-editor-process .ctt-special-execution-panel__status,
+.path-ctt .ctt-special-execution-panel__status {
   font-size: 0.8125rem;
   color: #2a4f73;
 }
 
 .path-ctt-editor .ctt-special-execution-panel__status[data-ctt-special-state="running"],
-.path-ctt-editor-process .ctt-special-execution-panel__status[data-ctt-special-state="running"] {
+.path-ctt-editor-process .ctt-special-execution-panel__status[data-ctt-special-state="running"],
+.path-ctt .ctt-special-execution-panel__status[data-ctt-special-state="running"] {
   color: #1f6b34;
 }
 
 .path-ctt-editor .ctt-special-execution-panel__status[data-ctt-special-state="success"],
-.path-ctt-editor-process .ctt-special-execution-panel__status[data-ctt-special-state="success"] {
+.path-ctt-editor-process .ctt-special-execution-panel__status[data-ctt-special-state="success"],
+.path-ctt .ctt-special-execution-panel__status[data-ctt-special-state="success"] {
   color: #1c5a26;
   font-weight: 600;
 }
 
 .path-ctt-editor .ctt-special-execution-panel__turn,
-.path-ctt-editor-process .ctt-special-execution-panel__turn {
+.path-ctt-editor-process .ctt-special-execution-panel__turn,
+.path-ctt .ctt-special-execution-panel__turn {
   margin-top: 0.35rem;
   padding: 0.32rem 0.45rem;
   border-radius: 0.28rem;
@@ -248,7 +254,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-execution-panel__turn[data-ctt-turn-state="active"],
-.path-ctt-editor-process .ctt-special-execution-panel__turn[data-ctt-turn-state="active"] {
+.path-ctt-editor-process .ctt-special-execution-panel__turn[data-ctt-turn-state="active"],
+.path-ctt .ctt-special-execution-panel__turn[data-ctt-turn-state="active"] {
   color: #0b4e7a;
   background: #e1f2ff;
   border-color: #90c7eb;
@@ -256,7 +263,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-execution-panel__turn[data-ctt-turn-state="ended"],
-.path-ctt-editor-process .ctt-special-execution-panel__turn[data-ctt-turn-state="ended"] {
+.path-ctt-editor-process .ctt-special-execution-panel__turn[data-ctt-turn-state="ended"],
+.path-ctt .ctt-special-execution-panel__turn[data-ctt-turn-state="ended"] {
   color: #1c5a26;
   background: #e7f8e8;
   border-color: #a9d8ad;
@@ -264,21 +272,24 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-execution-panel__turn[data-ctt-turn-state="completed"],
-.path-ctt-editor-process .ctt-special-execution-panel__turn[data-ctt-turn-state="completed"] {
+.path-ctt-editor-process .ctt-special-execution-panel__turn[data-ctt-turn-state="completed"],
+.path-ctt .ctt-special-execution-panel__turn[data-ctt-turn-state="completed"] {
   color: #2d3e55;
   background: #eef2f7;
   border-color: #c8d3e0;
 }
 
 .path-ctt-editor .ctt-special-task-nav,
-.path-ctt-editor-process .ctt-special-task-nav {
+.path-ctt-editor-process .ctt-special-task-nav,
+.path-ctt .ctt-special-task-nav {
   margin-top: 0.55rem;
   padding-top: 0.5rem;
   border-top: 1px dashed #b9cfe8;
 }
 
 .path-ctt-editor .ctt-special-task-nav__action-panel,
-.path-ctt-editor-process .ctt-special-task-nav__action-panel {
+.path-ctt-editor-process .ctt-special-task-nav__action-panel,
+.path-ctt .ctt-special-task-nav__action-panel {
   margin-top: 0.45rem;
   border: 2px solid #8ab7df;
   border-radius: 0.4rem;
@@ -287,7 +298,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-task-nav__action-title,
-.path-ctt-editor-process .ctt-special-task-nav__action-title {
+.path-ctt-editor-process .ctt-special-task-nav__action-title,
+.path-ctt .ctt-special-task-nav__action-title {
   font-size: 0.79rem;
   font-weight: 700;
   color: #174b75;
@@ -295,7 +307,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-task-nav__action-hint,
-.path-ctt-editor-process .ctt-special-task-nav__action-hint {
+.path-ctt-editor-process .ctt-special-task-nav__action-hint,
+.path-ctt .ctt-special-task-nav__action-hint {
   font-size: 0.79rem;
   padding: 0.35rem 0.45rem;
   border-radius: 0.3rem;
@@ -306,7 +319,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-task-nav__action-hint[data-ctt-action-state="required"],
-.path-ctt-editor-process .ctt-special-task-nav__action-hint[data-ctt-action-state="required"] {
+.path-ctt-editor-process .ctt-special-task-nav__action-hint[data-ctt-action-state="required"],
+.path-ctt .ctt-special-task-nav__action-hint[data-ctt-action-state="required"] {
   border-color: #f0b84e;
   background: #fff6e4;
   color: #7c4c00;
@@ -314,7 +328,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-task-nav__action-hint[data-ctt-action-state="auto"],
-.path-ctt-editor-process .ctt-special-task-nav__action-hint[data-ctt-action-state="auto"] {
+.path-ctt-editor-process .ctt-special-task-nav__action-hint[data-ctt-action-state="auto"],
+.path-ctt .ctt-special-task-nav__action-hint[data-ctt-action-state="auto"] {
   border-color: #9cc8ef;
   background: #e6f4ff;
   color: #0c4f7b;
@@ -322,21 +337,24 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-task-nav__title,
-.path-ctt-editor-process .ctt-special-task-nav__title {
+.path-ctt-editor-process .ctt-special-task-nav__title,
+.path-ctt .ctt-special-task-nav__title {
   font-size: 0.8125rem;
   font-weight: 600;
   color: #1d4b75;
 }
 
 .path-ctt-editor .ctt-special-task-nav__hint,
-.path-ctt-editor-process .ctt-special-task-nav__hint {
+.path-ctt-editor-process .ctt-special-task-nav__hint,
+.path-ctt .ctt-special-task-nav__hint {
   margin-top: 0.2rem;
   font-size: 0.78rem;
   color: #3a678f;
 }
 
 .path-ctt-editor .ctt-special-task-nav__current,
-.path-ctt-editor-process .ctt-special-task-nav__current {
+.path-ctt-editor-process .ctt-special-task-nav__current,
+.path-ctt .ctt-special-task-nav__current {
   margin-top: 0.4rem;
   font-size: 0.8rem;
   color: #123a5d;
@@ -347,25 +365,29 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-special-task-nav__actions,
-.path-ctt-editor-process .ctt-special-task-nav__actions {
+.path-ctt-editor-process .ctt-special-task-nav__actions,
+.path-ctt .ctt-special-task-nav__actions {
   margin-top: 0.45rem;
   display: flex;
   gap: 0.45rem;
 }
 
 .path-ctt-editor .ctt-special-task-nav__actions .btn,
-.path-ctt-editor-process .ctt-special-task-nav__actions .btn {
+.path-ctt-editor-process .ctt-special-task-nav__actions .btn,
+.path-ctt .ctt-special-task-nav__actions .btn {
   min-width: 110px;
   font-weight: 600;
 }
 
 .path-ctt-editor .ctt-special-task-nav__controls,
-.path-ctt-editor-process .ctt-special-task-nav__controls {
+.path-ctt-editor-process .ctt-special-task-nav__controls,
+.path-ctt .ctt-special-task-nav__controls {
   margin-top: 0.5rem;
 }
 
 .path-ctt-editor .ctt-task-control-card,
-.path-ctt-editor-process .ctt-task-control-card {
+.path-ctt-editor-process .ctt-task-control-card,
+.path-ctt .ctt-task-control-card {
   border: 1px solid #c9ddf4;
   background: #ffffff;
   border-radius: 0.35rem;
@@ -409,7 +431,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-task-note-wrap,
-.path-ctt-editor-process .ctt-task-note-wrap {
+.path-ctt-editor-process .ctt-task-note-wrap,
+.path-ctt .ctt-task-note-wrap {
   border: 1px solid #9fc2e4;
   background: #eff7ff;
   border-radius: 0.32rem;
@@ -418,7 +441,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-task-note,
-.path-ctt-editor-process .ctt-task-note {
+.path-ctt-editor-process .ctt-task-note,
+.path-ctt .ctt-task-note {
   width: 100%;
   border: 2px solid #7fb0dc;
   border-radius: 0.28rem;
@@ -429,7 +453,8 @@ body.path-ctt-editor-process footer.site-footer {
 }
 
 .path-ctt-editor .ctt-task-note:focus,
-.path-ctt-editor-process .ctt-task-note:focus {
+.path-ctt-editor-process .ctt-task-note:focus,
+.path-ctt .ctt-task-note:focus {
   border-color: #2f6ea5;
   box-shadow: 0 0 0 2px rgba(47, 110, 165, 0.15);
   outline: none;

@@ -74,7 +74,7 @@ class WorkflowLayoutExporter {
         ];
       }
 
-      $layout = $this->layoutGraph($graph['nodes'], $graph['children']);
+      $layout = $this->layoutGraph($graph['nodes'], $graph['children'], $graph['temporalEdges']);
       $svgMarkup = $this->buildSvgMarkup($layout);
       $pngDataUrl = $this->buildPngDataUrl($layout);
 
@@ -119,6 +119,7 @@ class WorkflowLayoutExporter {
     $nodes = [];
     $children = [];
     $parents = [];
+    $temporalByTask = [];
 
     foreach ($tasks as $task) {
       if (!is_array($task)) {
@@ -144,6 +145,7 @@ class WorkflowLayoutExporter {
         'typeUri' => $typeUri,
         'temporalDependency' => $temporalDependency,
       ];
+      $temporalByTask[$uri] = $temporalDependency;
       $children[$uri] = $children[$uri] ?? [];
 
       $subtaskUris = $task['hasSubtaskUris'] ?? $task['hasSubtask'] ?? [];
@@ -181,17 +183,115 @@ class WorkflowLayoutExporter {
       }
     }
 
+    $temporalEdges = $this->buildTemporalEdges($nodes, $temporalByTask);
+
     return [
       'nodes' => $nodes,
       'children' => $children,
       'parents' => $parents,
+      'temporalEdges' => $temporalEdges,
+    ];
+  }
+
+  /**
+   * Build temporal edges from vstoi:hasTemporalDependency expressions.
+   */
+  protected function buildTemporalEdges(array $nodes, array $temporalByTask): array {
+    $edges = [];
+
+    foreach ($temporalByTask as $taskUri => $dependency) {
+      $parsed = $this->parseTemporalDependency($dependency);
+      if ($parsed === NULL) {
+        continue;
+      }
+
+      $operator = $parsed['operator'];
+      $targets = $parsed['targets'];
+
+      foreach ($targets as $targetUri) {
+        if (!isset($nodes[$targetUri])) {
+          continue;
+        }
+
+        // CTT semantics: "after X" means X -> current, "before X" means current -> X.
+        if ($operator === 'after') {
+          $source = $targetUri;
+          $target = $taskUri;
+        }
+        elseif ($operator === 'before') {
+          $source = $taskUri;
+          $target = $targetUri;
+        }
+        else {
+          // For choice/parallel/independent/disables/interrupts, link current -> referenced.
+          $source = $taskUri;
+          $target = $targetUri;
+        }
+
+        if (!isset($nodes[$source]) || !isset($nodes[$target]) || $source === '' || $target === '') {
+          continue;
+        }
+
+        $edgeKey = $source . '|' . $target . '|' . $operator;
+        $edges[$edgeKey] = [
+          'source' => $source,
+          'target' => $target,
+          'operator' => $operator,
+          'isBranching' => in_array($operator, ['choice', 'parallel', 'independent'], TRUE),
+        ];
+      }
+    }
+
+    return array_values($edges);
+  }
+
+  /**
+   * Parse temporal dependency into operator + task URI targets.
+   */
+  protected function parseTemporalDependency(string $dependency): ?array {
+    $dependency = trim((string) preg_replace('/\s+/', ' ', $dependency));
+    if ($dependency === '') {
+      return NULL;
+    }
+
+    if (!preg_match('/^([a-zA-Z]+)\s+(.+)$/', $dependency, $matches)) {
+      return NULL;
+    }
+
+    $operator = strtolower(trim($matches[1]));
+    $targetExpr = trim($matches[2]);
+    if ($targetExpr === '') {
+      return NULL;
+    }
+
+    $validOperators = ['after', 'before', 'parallel', 'choice', 'independent', 'disables', 'interrupts'];
+    if (!in_array($operator, $validOperators, TRUE)) {
+      return NULL;
+    }
+
+    $targets = [];
+    $parts = preg_split('/[;,]/', $targetExpr) ?: [];
+    foreach ($parts as $part) {
+      $uri = trim((string) $part);
+      if ($uri !== '') {
+        $targets[] = $uri;
+      }
+    }
+
+    if (empty($targets)) {
+      return NULL;
+    }
+
+    return [
+      'operator' => $operator,
+      'targets' => array_values(array_unique($targets)),
     ];
   }
 
   /**
    * Compute deterministic visual layout for the task graph.
    */
-  protected function layoutGraph(array $nodes, array $children): array {
+  protected function layoutGraph(array $nodes, array $children, array $temporalEdges = []): array {
     $parents = [];
     foreach ($children as $parentUri => $childUris) {
       foreach ($childUris as $childUri) {
@@ -309,26 +409,41 @@ class WorkflowLayoutExporter {
     }
 
     $edgeCount = 0;
+    $hierarchyEdgeCount = 0;
     foreach ($children as $parentUri => $childUris) {
       if (!isset($positions[$parentUri])) {
         continue;
       }
       foreach ($childUris as $childUri) {
         if (isset($positions[$childUri])) {
+          $hierarchyEdgeCount++;
           $edgeCount++;
         }
+      }
+    }
+
+    $temporalEdgeCount = 0;
+    foreach ($temporalEdges as $edge) {
+      $source = (string) ($edge['source'] ?? '');
+      $target = (string) ($edge['target'] ?? '');
+      if ($source !== '' && $target !== '' && isset($positions[$source]) && isset($positions[$target])) {
+        $temporalEdgeCount++;
+        $edgeCount++;
       }
     }
 
     return [
       'nodes' => $nodes,
       'children' => $children,
+      'temporalEdges' => $temporalEdges,
       'ordered' => $ordered,
       'positions' => $positions,
       'boxW' => $boxW,
       'nodeRender' => $nodeRender,
       'width' => $width,
       'height' => $height,
+      'hierarchyEdgeCount' => $hierarchyEdgeCount,
+      'temporalEdgeCount' => $temporalEdgeCount,
       'edgeCount' => $edgeCount,
     ];
   }
@@ -339,6 +454,7 @@ class WorkflowLayoutExporter {
   protected function buildSvgMarkup(array $layout): string {
     $nodes = $layout['nodes'];
     $children = $layout['children'];
+    $temporalEdges = $layout['temporalEdges'] ?? [];
     $ordered = $layout['ordered'];
     $positions = $layout['positions'];
     $nodeRender = $layout['nodeRender'];
@@ -352,6 +468,9 @@ class WorkflowLayoutExporter {
     $svg[] = '  <filter id="ctt-card-shadow" x="-10%" y="-20%" width="130%" height="160%">';
     $svg[] = '    <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#9ca3af" flood-opacity="0.10" />';
     $svg[] = '  </filter>';
+    $svg[] = '  <marker id="ctt-arrow-default" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">';
+    $svg[] = '    <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />';
+    $svg[] = '  </marker>';
     $svg[] = '</defs>';
     $svg[] = '<rect x="0" y="0" width="' . $width . '" height="' . $height . '" fill="#ffffff" />';
 
@@ -374,6 +493,42 @@ class WorkflowLayoutExporter {
         $midY = (int) floor(($y1 + $y2) / 2);
 
         $svg[] = '<path d="M ' . $x1 . ' ' . $y1 . ' C ' . $x1 . ' ' . $midY . ', ' . $x2 . ' ' . $midY . ', ' . $x2 . ' ' . $y2 . '" stroke="#b4bfcb" stroke-width="1.6" fill="none" stroke-linecap="round" />';
+      }
+    }
+
+    // Temporal dependency edges with operator-specific visual semantics.
+    foreach ($temporalEdges as $edge) {
+      $sourceUri = (string) ($edge['source'] ?? '');
+      $targetUri = (string) ($edge['target'] ?? '');
+      $operator = strtolower((string) ($edge['operator'] ?? ''));
+      if (!isset($positions[$sourceUri]) || !isset($positions[$targetUri])) {
+        continue;
+      }
+
+      $style = $this->temporalEdgeStyle($operator);
+      $sourcePos = $positions[$sourceUri];
+      $targetPos = $positions[$targetUri];
+      $sourceH = (int) ($nodeRender[$sourceUri]['nodeHeight'] ?? 88);
+      $targetH = (int) ($nodeRender[$targetUri]['nodeHeight'] ?? 88);
+
+      $x1 = (int) $sourcePos['x'] + (int) floor($boxW / 2);
+      $y1 = (int) $sourcePos['y'] + (int) floor($sourceH / 2);
+      $x2 = (int) $targetPos['x'] + (int) floor($boxW / 2);
+      $y2 = (int) $targetPos['y'] + (int) floor($targetH / 2);
+
+      $controlX = (int) floor(($x1 + $x2) / 2);
+      $controlY = (int) floor(($y1 + $y2) / 2) - 18;
+
+      $path = 'M ' . $x1 . ' ' . $y1 . ' Q ' . $controlX . ' ' . $controlY . ', ' . $x2 . ' ' . $y2;
+      $dash = $style['dash'] !== '' ? ' stroke-dasharray="' . $style['dash'] . '"' : '';
+      $svg[] = '<path d="' . $path . '" stroke="' . $style['stroke'] . '" stroke-width="' . $style['width'] . '" fill="none" stroke-linecap="round" marker-end="url(#ctt-arrow-default)"' . $dash . ' opacity="0.92" />';
+
+      // Branch junction marker at edge source for branching operators.
+      if (!empty($edge['isBranching'])) {
+        $markerX = $x1;
+        $markerY = $y1;
+        $svg[] = '<circle cx="' . $markerX . '" cy="' . $markerY . '" r="6" fill="#ffffff" stroke="' . $style['stroke'] . '" stroke-width="1.8" />';
+        $svg[] = '<text x="' . $markerX . '" y="' . ($markerY + 3) . '" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="8" font-weight="700" fill="' . $style['stroke'] . '">' . htmlspecialchars($style['short'], ENT_QUOTES | ENT_SUBSTITUTE | ENT_XML1, 'UTF-8') . '</text>';
       }
     }
 
@@ -558,6 +713,7 @@ class WorkflowLayoutExporter {
 
     $nodes = $layout['nodes'];
     $children = $layout['children'];
+    $temporalEdges = $layout['temporalEdges'] ?? [];
     $ordered = $layout['ordered'];
     $positions = $layout['positions'];
     $nodeRender = $layout['nodeRender'] ?? [];
@@ -606,6 +762,46 @@ class WorkflowLayoutExporter {
       }
     }
 
+    // Draw temporal edges on top of hierarchy edges.
+    foreach ($temporalEdges as $temporalEdge) {
+      $sourceUri = (string) ($temporalEdge['source'] ?? '');
+      $targetUri = (string) ($temporalEdge['target'] ?? '');
+      $operator = strtolower((string) ($temporalEdge['operator'] ?? ''));
+
+      if (!isset($positions[$sourceUri]) || !isset($positions[$targetUri])) {
+        continue;
+      }
+
+      $style = $this->temporalEdgeStyle($operator);
+      $colorHex = ltrim((string) $style['stroke'], '#');
+      if (strlen($colorHex) !== 6) {
+        $colorHex = '64748b';
+      }
+      $r = hexdec(substr($colorHex, 0, 2));
+      $g = hexdec(substr($colorHex, 2, 2));
+      $b = hexdec(substr($colorHex, 4, 2));
+      $lineColor = imagecolorallocate($img, $r, $g, $b);
+
+      $sourcePos = $positions[$sourceUri];
+      $targetPos = $positions[$targetUri];
+      $sourceH = (int) (($nodeRender[$sourceUri]['nodeHeight'] ?? 88));
+      $targetH = (int) (($nodeRender[$targetUri]['nodeHeight'] ?? 88));
+
+      $x1 = (int) $sourcePos['x'] + (int) floor($boxW / 2);
+      $y1 = (int) $sourcePos['y'] + (int) floor($sourceH / 2);
+      $x2 = (int) $targetPos['x'] + (int) floor($boxW / 2);
+      $y2 = (int) $targetPos['y'] + (int) floor($targetH / 2);
+
+      imageline($img, $x1, $y1, $x2, $y2, $lineColor);
+
+      // Branch marker for choice/parallel/independent.
+      if (!empty($temporalEdge['isBranching'])) {
+        imagefilledellipse($img, $x1, $y1, 10, 10, $white);
+        imageellipse($img, $x1, $y1, 10, 10, $lineColor);
+        imagestring($img, 1, $x1 - 3, $y1 - 4, (string) ($style['short'] ?? ''), $lineColor);
+      }
+    }
+
     foreach ($ordered as $entry) {
       $uri = $entry['uri'];
       $node = $nodes[$uri] ?? ['label' => $uri];
@@ -640,5 +836,69 @@ class WorkflowLayoutExporter {
     }
 
     return 'data:image/png;base64,' . base64_encode($png);
+  }
+
+  /**
+   * Style map for temporal operators.
+   */
+  protected function temporalEdgeStyle(string $operator): array {
+    switch (strtolower(trim($operator))) {
+      case 'choice':
+        return [
+          'stroke' => '#dc2626',
+          'dash' => '6 4',
+          'width' => '2',
+          'short' => 'C',
+        ];
+
+      case 'parallel':
+        return [
+          'stroke' => '#0891b2',
+          'dash' => '3 3',
+          'width' => '2',
+          'short' => 'P',
+        ];
+
+      case 'independent':
+        return [
+          'stroke' => '#7c3aed',
+          'dash' => '1 4',
+          'width' => '2',
+          'short' => 'I',
+        ];
+
+      case 'after':
+      case 'before':
+        return [
+          'stroke' => '#334155',
+          'dash' => '',
+          'width' => '1.7',
+          'short' => 'S',
+        ];
+
+      case 'disables':
+        return [
+          'stroke' => '#ea580c',
+          'dash' => '8 4',
+          'width' => '2',
+          'short' => 'D',
+        ];
+
+      case 'interrupts':
+        return [
+          'stroke' => '#be123c',
+          'dash' => '8 3 2 3',
+          'width' => '2',
+          'short' => 'X',
+        ];
+
+      default:
+        return [
+          'stroke' => '#64748b',
+          'dash' => '4 3',
+          'width' => '1.8',
+          'short' => 'T',
+        ];
+    }
   }
 }

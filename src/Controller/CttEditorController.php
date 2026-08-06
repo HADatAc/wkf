@@ -20,6 +20,560 @@ use Drupal\Core\Render\Markup;
 class CttEditorController extends ControllerBase {
 
   /**
+   * Normalize URI text into a stable comparison key.
+   */
+  protected function normalizeUriKey(string $uri): string {
+    $normalized = trim($uri);
+    if ($normalized === '') {
+      return '';
+    }
+
+    if (str_contains($normalized, '#/')) {
+      $normalized = str_replace('#/', '#', $normalized);
+    }
+
+    return strtolower(rtrim($normalized, '/'));
+  }
+
+  /**
+   * Extract URI text from mixed scalar/object shapes.
+   */
+  protected function extractUriFromValue(mixed $value): string {
+    if (is_string($value)) {
+      $candidate = trim($value);
+      return $this->isUri($candidate) ? $candidate : '';
+    }
+
+    if (is_object($value)) {
+      foreach (['uri', 'hasURI', 'typeUri'] as $key) {
+        if (isset($value->{$key}) && is_string($value->{$key})) {
+          $candidate = trim((string) $value->{$key});
+          if ($this->isUri($candidate)) {
+            return $candidate;
+          }
+        }
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Convert list/object API responses into a plain list of objects.
+   *
+   * @return array<int, object>
+   */
+  protected function normalizeApiListPayload(mixed $payload): array {
+    if ($payload === NULL) {
+      return [];
+    }
+
+    if (is_object($payload)) {
+      if (isset($payload->elements) && is_array($payload->elements)) {
+        return array_values(array_filter($payload->elements, 'is_object'));
+      }
+
+      return [$payload];
+    }
+
+    if (!is_array($payload)) {
+      return [];
+    }
+
+    $list = [];
+    foreach ($payload as $item) {
+      if (is_object($item)) {
+        $list[] = $item;
+      }
+    }
+
+    return $list;
+  }
+
+  /**
+   * Resolve current user's primary organization context.
+   */
+  protected function resolveCurrentUserOrganizationContext(?string $studyUri = NULL): array {
+    $context = [
+      'organizationUri' => '',
+      'organizationLabel' => '',
+    ];
+
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return $this->resolveStudyOrganizationContext($studyUri);
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $userEmail = '';
+
+      try {
+        $user = \Drupal\user\Entity\User::load($this->currentUser->id());
+        if ($user && is_string($user->getEmail())) {
+          $userEmail = trim((string) $user->getEmail());
+        }
+      }
+      catch (\Throwable $ignored) {
+        $userEmail = '';
+      }
+
+      if ($userEmail !== '') {
+        $orgRaw = $api->listByManagerEmail('organization', $userEmail, 50, 0);
+        $orgParsed = $api->parseObjectResponse($orgRaw, 'listByManagerEmail');
+        $organizations = $this->normalizeApiListPayload($orgParsed);
+
+        foreach ($organizations as $organization) {
+          if (!is_object($organization)) {
+            continue;
+          }
+
+          $orgUri = trim((string) ($organization->uri ?? $organization->hasURI ?? ''));
+          if (!$this->isUri($orgUri)) {
+            continue;
+          }
+
+          $context['organizationUri'] = $orgUri;
+          $context['organizationLabel'] = trim((string) ($organization->label ?? $organization->name ?? ''));
+          break;
+        }
+
+        if ($context['organizationUri'] === '') {
+          $peopleRaw = $api->listByManagerEmail('person', $userEmail, 50, 0);
+          $peopleParsed = $api->parseObjectResponse($peopleRaw, 'listByManagerEmail');
+          $people = $this->normalizeApiListPayload($peopleParsed);
+
+          foreach ($people as $person) {
+            if (!is_object($person)) {
+              continue;
+            }
+
+            $affiliationUri = '';
+            if (isset($person->hasAffiliation)) {
+              $affiliationUri = $this->extractUriFromValue($person->hasAffiliation);
+            }
+            if ($affiliationUri === '' && isset($person->hasAffiliationUri) && is_string($person->hasAffiliationUri)) {
+              $affiliationUri = trim((string) $person->hasAffiliationUri);
+            }
+
+            if (!$this->isUri($affiliationUri)) {
+              continue;
+            }
+
+            $context['organizationUri'] = $affiliationUri;
+            $context['organizationLabel'] = trim((string) ($person->hasAffiliation->label ?? ''));
+            break;
+          }
+        }
+      }
+
+      if ($context['organizationLabel'] === '' && $context['organizationUri'] !== '') {
+        $context['organizationLabel'] = $this->resolveLabelByUri($context['organizationUri']);
+      }
+    }
+    catch (\Throwable $ignored) {
+      $context = [
+        'organizationUri' => '',
+        'organizationLabel' => '',
+      ];
+    }
+
+    if ($context['organizationUri'] === '') {
+      return $this->resolveStudyOrganizationContext($studyUri);
+    }
+
+    return $context;
+  }
+
+  /**
+   * Resolve organization context from a Process-Based Study URI.
+   */
+  protected function resolveStudyOrganizationContext(?string $studyUri): array {
+    $context = [
+      'organizationUri' => '',
+      'organizationLabel' => '',
+    ];
+
+    $normalizedStudyUri = trim((string) $studyUri);
+    if ($normalizedStudyUri === '' || !\Drupal::hasService('rep.api_connector')) {
+      return $context;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $study = $api->parseObjectResponse($api->getUri($normalizedStudyUri), 'getUri');
+      if (!is_object($study)) {
+        return $context;
+      }
+
+      $institution = $study->institution ?? $study->hasInstitution ?? NULL;
+      if (is_object($institution)) {
+        $context['organizationUri'] = trim((string) ($institution->uri ?? $institution->hasURI ?? ''));
+        $context['organizationLabel'] = trim((string) ($institution->label ?? $institution->name ?? ''));
+      }
+      elseif (is_string($institution)) {
+        $institutionCandidate = trim($institution);
+        if ($this->isUri($institutionCandidate)) {
+          $context['organizationUri'] = $institutionCandidate;
+        }
+        else {
+          $context['organizationLabel'] = $institutionCandidate;
+        }
+      }
+
+      if ($context['organizationUri'] === '') {
+        foreach (['hasInstitutionUri', 'institutionUri'] as $key) {
+          if (!isset($study->{$key}) || !is_string($study->{$key})) {
+            continue;
+          }
+
+          $candidate = trim((string) $study->{$key});
+          if ($this->isUri($candidate)) {
+            $context['organizationUri'] = $candidate;
+            break;
+          }
+        }
+      }
+
+      if ($context['organizationLabel'] === '') {
+        $context['organizationLabel'] = trim((string) ($study->institutionName ?? ''));
+      }
+
+      if ($context['organizationLabel'] === '' && $context['organizationUri'] !== '') {
+        $context['organizationLabel'] = $this->resolveLabelByUri($context['organizationUri']);
+      }
+    }
+    catch (\Throwable $ignored) {
+      return $context;
+    }
+
+    return $context;
+  }
+
+  /**
+   * Resolve direct/indirect organization scope for filtering.
+   *
+   * @return string[]
+   */
+  protected function resolveOrganizationScopeUris(string $organizationUri): array {
+    $scope = [];
+    $normalizedRoot = trim($organizationUri);
+    if (!$this->isUri($normalizedRoot) || !\Drupal::hasService('rep.api_connector')) {
+      return [];
+    }
+
+    $scope[$normalizedRoot] = TRUE;
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $org = $api->parseObjectResponse($api->getUri($normalizedRoot), 'getUri');
+
+      if (is_object($org)) {
+        foreach (['parentOrganizationUri', 'hasParentOrganizationUri', 'parentOrganization', 'hasParentOrganization', 'isPartOf', 'partOf'] as $key) {
+          if (!isset($org->{$key})) {
+            continue;
+          }
+
+          $parentUri = $this->extractUriFromValue($org->{$key});
+          if ($parentUri !== '' && $this->isUri($parentUri)) {
+            $scope[$parentUri] = TRUE;
+          }
+        }
+      }
+
+      if (method_exists($api, 'sparqlQuery')) {
+        $sparqlParents = 'SELECT DISTINCT ?parent WHERE {'
+          . ' <' . $normalizedRoot . '> <https://schema.org/isPartOf> ?parent .'
+          . '}';
+
+        $rawParents = $api->sparqlQuery($sparqlParents);
+        $parentsDecoded = json_decode((string) $rawParents, TRUE);
+        $parentsBindings = $parentsDecoded['results']['bindings'] ?? [];
+        if (is_array($parentsBindings)) {
+          foreach ($parentsBindings as $binding) {
+            if (!is_array($binding)) {
+              continue;
+            }
+            $parentUri = trim((string) ($binding['parent']['value'] ?? ''));
+            if ($this->isUri($parentUri)) {
+              $scope[$parentUri] = TRUE;
+            }
+          }
+        }
+
+        $sparqlChildren = 'SELECT DISTINCT ?child WHERE {'
+          . ' ?child <https://schema.org/isPartOf> <' . $normalizedRoot . '> .'
+          . '}';
+
+        $rawChildren = $api->sparqlQuery($sparqlChildren);
+        $childrenDecoded = json_decode((string) $rawChildren, TRUE);
+        $childrenBindings = $childrenDecoded['results']['bindings'] ?? [];
+        if (is_array($childrenBindings)) {
+          foreach ($childrenBindings as $binding) {
+            if (!is_array($binding)) {
+              continue;
+            }
+            $childUri = trim((string) ($binding['child']['value'] ?? ''));
+            if ($this->isUri($childUri)) {
+              $scope[$childUri] = TRUE;
+            }
+          }
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      // Keep best-effort scope.
+    }
+
+    return array_values(array_keys($scope));
+  }
+
+  /**
+   * Resolve platform instances that belong to one organization.
+   *
+   * @return array<string, string>
+   *   Map of platform instance URI to display label.
+   */
+  protected function resolveOrganizationPlatformInstances(array $organizationScopeUris): array {
+    $options = [];
+    if (empty($organizationScopeUris) || !\Drupal::hasService('rep.api_connector')) {
+      return $options;
+    }
+
+    $scopeKeys = [];
+    foreach ($organizationScopeUris as $candidateUri) {
+      $candidateKey = $this->normalizeUriKey((string) $candidateUri);
+      if ($candidateKey !== '') {
+        $scopeKeys[$candidateKey] = TRUE;
+      }
+    }
+    if (empty($scopeKeys)) {
+      return $options;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $pageSize = 100;
+      $maxPages = 12;
+
+      for ($page = 0; $page < $maxPages; $page++) {
+        $offset = $page * $pageSize;
+        $raw = $api->listByKeyword('platforminstance', '_', $pageSize, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $chunk = $this->normalizeApiListPayload($parsed);
+        if (empty($chunk)) {
+          break;
+        }
+
+        foreach ($chunk as $platformInstance) {
+          if (!is_object($platformInstance)) {
+            continue;
+          }
+
+          $platformUri = trim((string) ($platformInstance->uri ?? ''));
+          if (!$this->isUri($platformUri)) {
+            continue;
+          }
+
+          $partOfUri = '';
+          if (isset($platformInstance->partOf)) {
+            $partOfUri = $this->extractUriFromValue($platformInstance->partOf);
+          }
+          if ($partOfUri === '' && isset($platformInstance->partOfUri) && is_string($platformInstance->partOfUri)) {
+            $partOfUri = trim((string) $platformInstance->partOfUri);
+          }
+
+          $partOfKey = $this->normalizeUriKey($partOfUri);
+          if ($partOfKey === '' || !isset($scopeKeys[$partOfKey])) {
+            continue;
+          }
+
+          $label = trim((string) ($platformInstance->label ?? $platformInstance->name ?? $platformUri));
+          $options[$platformUri] = [
+            'label' => $label !== '' ? $label : $platformUri,
+            'organizationUri' => $partOfUri,
+          ];
+        }
+
+        if (count($chunk) < $pageSize) {
+          break;
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      return $options;
+    }
+
+    uasort($options, function ($a, $b) {
+      $left = is_array($a) ? (string) ($a['label'] ?? '') : (string) $a;
+      $right = is_array($b) ? (string) ($b['label'] ?? '') : (string) $b;
+      return strcasecmp($left, $right);
+    });
+    return $options;
+  }
+
+  /**
+   * Resolve instrument model URIs deployed on the selected platform instances.
+   *
+   * @param array<string, string> $platformOptions
+   *
+   * @return array<int, string>
+   */
+  protected function resolveAllowedInstrumentUrisByPlatforms(array $platformOptions): array {
+    if (empty($platformOptions) || !\Drupal::hasService('rep.api_connector')) {
+      return [
+        'allowedInstrumentUris' => [],
+        'platformInstrumentUris' => [],
+      ];
+    }
+
+    $platformKeys = [];
+    foreach (array_keys($platformOptions) as $platformUri) {
+      $key = $this->normalizeUriKey((string) $platformUri);
+      if ($key !== '') {
+        $platformKeys[$key] = TRUE;
+      }
+    }
+    if (empty($platformKeys)) {
+      return [];
+    }
+
+    $instrumentUris = [];
+    $platformInstrumentUris = [];
+    $instrumentInstanceCache = [];
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $pageSize = 100;
+      $maxPages = 12;
+
+      for ($page = 0; $page < $maxPages; $page++) {
+        $offset = $page * $pageSize;
+        $raw = $api->listByKeyword('deployment', '_', $pageSize, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $chunk = $this->normalizeApiListPayload($parsed);
+        if (empty($chunk)) {
+          break;
+        }
+
+        foreach ($chunk as $deployment) {
+          if (!is_object($deployment)) {
+            continue;
+          }
+
+          $platformUri = '';
+          if (isset($deployment->platformInstance)) {
+            $platformUri = $this->extractUriFromValue($deployment->platformInstance);
+          }
+          if ($platformUri === '' && isset($deployment->platformInstanceUri) && is_string($deployment->platformInstanceUri)) {
+            $platformUri = trim((string) $deployment->platformInstanceUri);
+          }
+
+          if (!isset($platformKeys[$this->normalizeUriKey($platformUri)])) {
+            continue;
+          }
+
+          $instrumentInstanceUri = '';
+          if (isset($deployment->instrumentInstance)) {
+            $instrumentInstanceUri = $this->extractUriFromValue($deployment->instrumentInstance);
+          }
+          if ($instrumentInstanceUri === '' && isset($deployment->instrumentInstanceUri) && is_string($deployment->instrumentInstanceUri)) {
+            $instrumentInstanceUri = trim((string) $deployment->instrumentInstanceUri);
+          }
+          if (!$this->isUri($instrumentInstanceUri)) {
+            continue;
+          }
+
+          if (!array_key_exists($instrumentInstanceUri, $instrumentInstanceCache)) {
+            $resolvedInstrumentUri = '';
+            try {
+              $instrumentInstance = $api->parseObjectResponse($api->getUri($instrumentInstanceUri), 'getUri');
+              if (is_object($instrumentInstance)) {
+                if (isset($instrumentInstance->typeUri) && is_string($instrumentInstance->typeUri)) {
+                  $resolvedInstrumentUri = trim((string) $instrumentInstance->typeUri);
+                }
+                if (!$this->isUri($resolvedInstrumentUri) && isset($instrumentInstance->type)) {
+                  $resolvedInstrumentUri = $this->extractUriFromValue($instrumentInstance->type);
+                }
+                if (!$this->isUri($resolvedInstrumentUri) && isset($instrumentInstance->instrument)) {
+                  $resolvedInstrumentUri = $this->extractUriFromValue($instrumentInstance->instrument);
+                }
+              }
+            }
+            catch (\Throwable $ignored) {
+              $resolvedInstrumentUri = '';
+            }
+
+            $instrumentInstanceCache[$instrumentInstanceUri] = $this->isUri($resolvedInstrumentUri)
+              ? $resolvedInstrumentUri
+              : '';
+          }
+
+          $instrumentUri = trim((string) ($instrumentInstanceCache[$instrumentInstanceUri] ?? ''));
+          if ($this->isUri($instrumentUri)) {
+            $instrumentUris[$instrumentUri] = TRUE;
+            if (!isset($platformInstrumentUris[$platformUri])) {
+              $platformInstrumentUris[$platformUri] = [];
+            }
+            $platformInstrumentUris[$platformUri][$instrumentUri] = TRUE;
+          }
+        }
+
+        if (count($chunk) < $pageSize) {
+          break;
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      return [
+        'allowedInstrumentUris' => [],
+        'platformInstrumentUris' => [],
+      ];
+    }
+
+    $platformUrisNormalized = [];
+    foreach ($platformInstrumentUris as $platformUri => $bucket) {
+      $platformUrisNormalized[$platformUri] = array_values(array_keys($bucket));
+    }
+
+    return [
+      'allowedInstrumentUris' => array_values(array_keys($instrumentUris)),
+      'platformInstrumentUris' => $platformUrisNormalized,
+    ];
+  }
+
+  /**
+   * Build context for organization-aware instrument selection in the canvas.
+   */
+  protected function buildInstrumentSelectionContext(?string $studyUri): array {
+    $organization = $this->resolveCurrentUserOrganizationContext($studyUri);
+    $organizationScopeUris = $this->resolveOrganizationScopeUris((string) ($organization['organizationUri'] ?? ''));
+    $platformDetails = $this->resolveOrganizationPlatformInstances($organizationScopeUris);
+    $availability = $this->resolveAllowedInstrumentUrisByPlatforms($platformDetails);
+
+    $platformOptions = [];
+    foreach ($platformDetails as $platformUri => $details) {
+      $platformOptions[$platformUri] = is_array($details)
+        ? (string) ($details['label'] ?? $platformUri)
+        : (string) $details;
+    }
+
+    $preferredInstrument = \Drupal::config('rep.settings')->get('preferred_instrument') ?? 'Instrument';
+    $preferredPlatform = \Drupal::config('rep.settings')->get('preferred_platform') ?? 'Platform';
+
+    return [
+      'preferredInstrumentLabel' => ucfirst((string) $preferredInstrument),
+      'preferredPlatformLabel' => ucfirst((string) $preferredPlatform),
+      'organizationUri' => (string) ($organization['organizationUri'] ?? ''),
+      'organizationLabel' => (string) ($organization['organizationLabel'] ?? ''),
+      'organizationScopeUris' => $organizationScopeUris,
+      'platformOptions' => $platformOptions,
+      'allowedInstrumentUris' => is_array($availability) ? (array) ($availability['allowedInstrumentUris'] ?? []) : [],
+      'platformInstrumentUris' => is_array($availability) ? (array) ($availability['platformInstrumentUris'] ?? []) : [],
+      'filterActive' => !empty($availability['allowedInstrumentUris']),
+    ];
+  }
+
+  /**
    * Resolve a human-readable label for a URI from available APIs.
    */
   protected function resolveLabelByUri(?string $uri): string {
@@ -106,6 +660,136 @@ class CttEditorController extends ControllerBase {
   }
 
   /**
+   * Resolve state key used for process execution history per study.
+   */
+  protected function getProcessExecutionHistoryKey(string $studyUri): string {
+    return 'ctt.process_execution_runs.' . sha1(trim($studyUri));
+  }
+
+  /**
+   * Resolve state key for the active execution run for one study/process/user.
+   */
+  protected function getProcessExecutionActiveKey(string $studyUri, string $processUri, string $userIdentifier): string {
+    return 'ctt.process_execution_active.' . sha1(trim($studyUri) . '|' . trim($processUri) . '|' . trim($userIdentifier));
+  }
+
+  /**
+   * @return array<int, array<string, mixed>>
+   */
+  protected function loadProcessExecutionHistory(string $studyUri): array {
+    $history = \Drupal::state()->get($this->getProcessExecutionHistoryKey($studyUri), []);
+    return is_array($history) ? $history : [];
+  }
+
+  /**
+   * @param array<int, array<string, mixed>> $history
+   */
+  protected function saveProcessExecutionHistory(string $studyUri, array $history): void {
+    if (count($history) > 200) {
+      $history = array_slice($history, 0, 200);
+    }
+    \Drupal::state()->set($this->getProcessExecutionHistoryKey($studyUri), array_values($history));
+  }
+
+  /**
+   * Register process execution start if no active running run is open.
+   */
+  protected function registerProcessExecutionStart(string $studyUri, string $processUri, string $mode = 'ctt-simulator'): void {
+    $studyUri = trim($studyUri);
+    $processUri = trim($processUri);
+    if (!$this->isUri($studyUri) || !$this->isUri($processUri)) {
+      return;
+    }
+
+    $userIdentifier = trim((string) $this->currentUser->getDisplayName());
+    try {
+      $user = \Drupal\user\Entity\User::load($this->currentUser->id());
+      if ($user && is_string($user->getEmail()) && trim($user->getEmail()) !== '') {
+        $userIdentifier = trim((string) $user->getEmail());
+      }
+    }
+    catch (\Throwable $ignored) {
+      // Keep display-name fallback.
+    }
+
+    $activeKey = $this->getProcessExecutionActiveKey($studyUri, $processUri, $userIdentifier);
+    $activeRunId = trim((string) \Drupal::state()->get($activeKey, ''));
+    $history = $this->loadProcessExecutionHistory($studyUri);
+
+    $simulationType = 'individual';
+    $studentIds = [];
+    $simulationContext = \Drupal::state()->get($this->getSimulationContextKey($studyUri, $processUri, $userIdentifier), []);
+    if (is_array($simulationContext)) {
+      $contextType = strtolower(trim((string) ($simulationContext['simulationType'] ?? '')));
+      if (in_array($contextType, ['individual', 'cohort'], TRUE)) {
+        $simulationType = $contextType;
+      }
+
+      if (isset($simulationContext['studentIds']) && is_array($simulationContext['studentIds'])) {
+        foreach ($simulationContext['studentIds'] as $candidateStudentId) {
+          $normalizedStudentId = trim((string) $candidateStudentId);
+          if ($normalizedStudentId !== '') {
+            $studentIds[$normalizedStudentId] = $normalizedStudentId;
+          }
+        }
+      }
+    }
+
+    if ($simulationType === 'cohort' && empty($studentIds)) {
+      $resolvedStudentIds = $this->resolveSocStudentIds($studyUri);
+      foreach ($resolvedStudentIds as $candidateStudentId) {
+        $normalizedStudentId = trim((string) $candidateStudentId);
+        if ($normalizedStudentId !== '') {
+          $studentIds[$normalizedStudentId] = $normalizedStudentId;
+        }
+      }
+    }
+
+    if ($activeRunId !== '') {
+      foreach ($history as $index => $entry) {
+        if (!is_array($entry)) {
+          continue;
+        }
+        if (trim((string) ($entry['runId'] ?? '')) !== $activeRunId) {
+          continue;
+        }
+        $status = strtolower(trim((string) ($entry['status'] ?? '')));
+        if (in_array($status, ['running', 'queued'], TRUE)) {
+          $history[$index]['status'] = 'aborted';
+          $history[$index]['finishedAt'] = gmdate('c');
+          $history[$index]['note'] = 'Automatically closed because a newer execution was started.';
+        }
+        break;
+      }
+    }
+
+    $runId = 'PX' . strtoupper(substr(sha1($studyUri . '|' . $processUri . '|' . microtime(TRUE)), 0, 12));
+    $startedAt = gmdate('c');
+
+    array_unshift($history, [
+      'runId' => $runId,
+      'studyUri' => $studyUri,
+      'processUri' => $processUri,
+      'toolUri' => 'ctt://process-execution',
+      'toolLabel' => 'CTT Process Execution',
+      'requestedAt' => $startedAt,
+      'startedAt' => $startedAt,
+      'finishedAt' => '',
+      'status' => 'running',
+      'requestedBy' => $userIdentifier,
+      'mode' => $mode,
+      'simulationType' => $simulationType,
+      'studentIds' => array_values($studentIds),
+      'datasetUri' => '',
+      'dataFileUri' => '',
+      'daUri' => '',
+    ]);
+
+    $this->saveProcessExecutionHistory($studyUri, $history);
+    \Drupal::state()->set($activeKey, $runId);
+  }
+
+  /**
    * @var \Drupal\Core\Config\ConfigFactoryInterface
    */
   protected $configFactory;
@@ -157,6 +841,98 @@ class CttEditorController extends ControllerBase {
   protected function isTruthyFlag(string $value): bool {
     $normalized = strtolower(trim($value));
     return $normalized === '1' || $normalized === 'true' || $normalized === 'yes';
+  }
+
+  /**
+   * Resolve current user identifier for execution context keys.
+   */
+  protected function getCurrentUserIdentifier(): string {
+    $identifier = trim((string) $this->currentUser->getDisplayName());
+    try {
+      $user = \Drupal\user\Entity\User::load($this->currentUser->id());
+      if ($user && is_string($user->getEmail()) && trim($user->getEmail()) !== '') {
+        $identifier = trim((string) $user->getEmail());
+      }
+    }
+    catch (\Throwable $ignored) {
+      // Keep display-name fallback.
+    }
+    return $identifier;
+  }
+
+  /**
+   * Build state key for simulator execution context.
+   */
+  protected function getSimulationContextKey(string $studyUri, string $processUri, string $userIdentifier): string {
+    return 'ctt.simulation_context.' . sha1(trim($studyUri) . '|' . trim($processUri) . '|' . trim($userIdentifier));
+  }
+
+  /**
+   * Resolve SOC-STUDENT member IDs for a study.
+   *
+   * @return array<int, string>
+   */
+  protected function resolveSocStudentIds(string $studyUri): array {
+    $studyUri = trim($studyUri);
+    if ($studyUri === '' || !\Drupal::hasService('rep.api_connector')) {
+      return [];
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $socsRaw = $api->studyObjectCollectionsByStudy($studyUri);
+      $socs = $api->parseObjectResponse($socsRaw, 'studyObjectCollectionsByStudy');
+      if (is_object($socs)) {
+        $socs = [$socs];
+      }
+      if (!is_array($socs) || empty($socs)) {
+        return [];
+      }
+
+      $studentSocUri = '';
+      foreach ($socs as $soc) {
+        if (!is_object($soc)) {
+          continue;
+        }
+
+        $candidateUri = strtoupper(trim((string) ($soc->uri ?? '')));
+        $candidateLabel = strtoupper(trim((string) ($soc->label ?? '')));
+        if (strpos($candidateUri, 'SOC-STUDENT') !== FALSE || strpos($candidateLabel, 'SOC-STUDENT') !== FALSE) {
+          $studentSocUri = trim((string) ($soc->uri ?? ''));
+          break;
+        }
+      }
+
+      if ($studentSocUri === '') {
+        return [];
+      }
+
+      $membersRaw = $api->studyObjectsBySOCwithPage($studentSocUri, 10000, 0);
+      $members = $api->parseObjectResponse($membersRaw, 'studyObjectsBySOCwithPage');
+      if (is_object($members)) {
+        $members = [$members];
+      }
+      if (!is_array($members) || empty($members)) {
+        return [];
+      }
+
+      $studentIds = [];
+      foreach ($members as $member) {
+        if (!is_object($member)) {
+          continue;
+        }
+
+        $studentId = trim((string) ($member->id ?? $member->label ?? $member->uri ?? ''));
+        if ($studentId !== '') {
+          $studentIds[$studentId] = $studentId;
+        }
+      }
+
+      return array_values($studentIds);
+    }
+    catch (\Throwable $ignored) {
+      return [];
+    }
   }
 
   /**
@@ -325,9 +1101,38 @@ class CttEditorController extends ControllerBase {
       'submission' => '1',
     ];
 
+    $simulationType = strtolower(trim((string) \Drupal::request()->query->get('simulationType', '')));
+    if (!in_array($simulationType, ['individual', 'cohort'], TRUE)) {
+      $simulationType = 'individual';
+    }
+
+    $studentIds = [];
+    if ($simulationType === 'cohort') {
+      $studentIds = $this->resolveSocStudentIds($decodedStudyUri);
+      if (empty($studentIds)) {
+        $this->messenger()->addError($this->t('Cohort CTT Simulator requires SOC-STUDENT to include at least one student object. Add students first and try again.'));
+        $returnToRaw = trim((string) \Drupal::request()->query->get('returnTo', ''));
+        $returnTo = rawurldecode($returnToRaw);
+        if ($returnTo !== '' && str_starts_with($returnTo, '/')) {
+          return new RedirectResponse($returnTo);
+        }
+        return $this->redirect('std.manage_study_elements', [
+          'studyuri' => base64_encode($decodedStudyUri),
+        ]);
+      }
+    }
+
+    $query['simulationType'] = $simulationType;
+
     $autoExecuteFlag = (string) \Drupal::request()->query->get('autoExecute', '');
     if ($this->isTruthyFlag($autoExecuteFlag)) {
       $query['autoExecute'] = '1';
+    }
+
+    $testModeFlag = (string) \Drupal::request()->query->get('test', '');
+    $testMode = $this->isTruthyFlag($testModeFlag);
+    if ($this->isTruthyFlag($testModeFlag)) {
+      $query['test'] = '1';
     }
 
     $executionPanel = strtolower(trim((string) \Drupal::request()->query->get('executionPanel', '')));
@@ -343,6 +1148,19 @@ class CttEditorController extends ControllerBase {
 
     if (!empty($processUri)) {
       $query['processUri'] = $processUri;
+
+      $userIdentifier = $this->getCurrentUserIdentifier();
+      if ($userIdentifier !== '') {
+        $simulationContextKey = $this->getSimulationContextKey($decodedStudyUri, $processUri, $userIdentifier);
+        $newContext = [
+          'simulationType' => $simulationType,
+          'testMode' => $testMode,
+          'studentIds' => $studentIds,
+          'recordedAt' => gmdate('c'),
+        ];
+
+        \Drupal::state()->set($simulationContextKey, $newContext);
+      }
     }
 
     return $this->redirect('ctt.editor', [], ['query' => $query]);
@@ -367,6 +1185,7 @@ class CttEditorController extends ControllerBase {
     if ($returnTo !== '' && !str_starts_with($returnTo, '/')) {
       $returnTo = '';
     }
+
     $editorMode = $this->isTruthyFlag((string) \Drupal::request()->query->get('editor', ''));
     $editorToolUri = trim((string) \Drupal::request()->query->get('toolUri', ''));
 
@@ -973,6 +1792,7 @@ class CttEditorController extends ControllerBase {
 
     $autoExecuteFlag = (string) \Drupal::request()->query->get('autoExecute', '');
     $autoExecute = $this->isTruthyFlag($autoExecuteFlag);
+    $testMode = $this->isTruthyFlag((string) \Drupal::request()->query->get('test', ''));
 
     $executionPanel = strtolower(trim((string) \Drupal::request()->query->get('executionPanel', '')));
     if (!in_array($executionPanel, ['top'], TRUE)) {
@@ -1015,6 +1835,10 @@ class CttEditorController extends ControllerBase {
 
     if (!empty($study_uri) && !empty($resolvedProcessUri)) {
       $this->persistStudyProcessAssociation($study_uri, (string) $resolvedProcessUri);
+
+      if (($isSubmissionMode && $autoExecute) || $isExecutionMode) {
+        $this->registerProcessExecutionStart((string) $study_uri, (string) $resolvedProcessUri, $isExecutionMode ? 'execution' : 'submission-auto');
+      }
     }
 
     $encodedDaUri = \Drupal::request()->query->get('daUri');
@@ -1093,6 +1917,43 @@ class CttEditorController extends ControllerBase {
       }
     }
 
+    $simulationType = strtolower(trim((string) \Drupal::request()->query->get('simulationType', '')));
+    if (!in_array($simulationType, ['individual', 'cohort'], TRUE)) {
+      $simulationType = 'individual';
+    }
+
+    $simulationStudentIds = [];
+    if ($isSubmissionMode && !empty($study_uri) && !empty($resolvedProcessUri)) {
+      $userIdentifier = $this->getCurrentUserIdentifier();
+      if ($userIdentifier !== '') {
+        $simulationContext = \Drupal::state()->get($this->getSimulationContextKey((string) $study_uri, (string) $resolvedProcessUri, $userIdentifier), []);
+        if (is_array($simulationContext)) {
+          $contextType = strtolower(trim((string) ($simulationContext['simulationType'] ?? '')));
+          if (in_array($contextType, ['individual', 'cohort'], TRUE)) {
+            $simulationType = $contextType;
+          }
+
+          if (isset($simulationContext['studentIds']) && is_array($simulationContext['studentIds'])) {
+            foreach ($simulationContext['studentIds'] as $candidateStudentId) {
+              $normalizedStudentId = trim((string) $candidateStudentId);
+              if ($normalizedStudentId !== '') {
+                $simulationStudentIds[$normalizedStudentId] = $normalizedStudentId;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if ($isSubmissionMode && $simulationType === 'cohort' && empty($simulationStudentIds) && !empty($study_uri)) {
+      foreach ($this->resolveSocStudentIds((string) $study_uri) as $candidateStudentId) {
+        $normalizedStudentId = trim((string) $candidateStudentId);
+        if ($normalizedStudentId !== '') {
+          $simulationStudentIds[$normalizedStudentId] = $normalizedStudentId;
+        }
+      }
+    }
+
     // Build drupalSettings for the React app.
     $drupal_settings = [
       'drupalBaseUrl' => $drupal_base_url,
@@ -1151,11 +2012,19 @@ class CttEditorController extends ControllerBase {
       'specialExecution' => [
         'enabled' => $isSubmissionMode,
         'autoExecute' => $isSubmissionMode && $autoExecute,
+        'testMode' => $isSubmissionMode && $testMode,
         'executionPanel' => $executionPanel,
         'redirectOnCompletion' => $isSubmissionMode && $autoExecute && $returnTo !== '',
         'returnTo' => $returnTo,
+        'simulationType' => $simulationType,
+        'studentIds' => array_values($simulationStudentIds),
+        'cohortProgressKey' => (!empty($study_uri) && !empty($resolvedProcessUri))
+          ? ('ctt.cohort.progress.' . sha1((string) $study_uri . '|' . (string) $resolvedProcessUri))
+          : '',
       ],
     ];
+
+    $drupal_settings['instrumentSelection'] = $this->buildInstrumentSelectionContext($study_uri);
 
     $scenarioLabel = $this->resolveLabelByUri($study_uri);
     $processLabel = $this->resolveLabelByUri($resolvedProcessUri);

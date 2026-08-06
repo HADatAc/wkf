@@ -15,13 +15,13 @@ ctt-editor-app:
 
 # CTT Editor init - Drupal behavior that bootstraps the React app
 ctt-editor-init:
-  version: 2.0
+  version: 2.1
   css:
     theme:
-      css/ctt-embed-layout.css: {}
+      css/ctt-embed-layout-v20260806.css: {}
       css/ctt-task-width-override.css: {}
   js:
-    js/ctt-init.js: {}
+    js/ctt-init-v20260806.js: {}
   dependencies:
     - ctt/ctt-editor-app
     - core/drupal
