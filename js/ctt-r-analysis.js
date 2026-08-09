@@ -7,35 +7,6 @@
   const MAX_AUTOCOMPLETE_SUGGESTIONS = 30;
   const MAX_BACKEND_STUDY_SUGGESTIONS = 20;
 
-  const ARGUMENT_TEMPLATES = {
-    "aspiration-baseline": {
-      scenarioCode: "aspiracao_de_secrecoes",
-      patientGroup: "adult_icu",
-      samplingWindowHours: 24,
-      includeImageSignals: true,
-      expectedSecretionVolumeMl: 35,
-      oxygenSaturationThreshold: 92
-    },
-    "aspiration-high-risk": {
-      scenarioCode: "aspiracao_de_secrecoes",
-      patientGroup: "high_risk_post_extubation",
-      samplingWindowHours: 48,
-      includeImageSignals: true,
-      expectedSecretionVolumeMl: 50,
-      oxygenSaturationThreshold: 90,
-      urgencyWeight: 0.85
-    },
-    "aspiration-followup": {
-      scenarioCode: "aspiracao_de_secrecoes",
-      patientGroup: "followup_reassessment",
-      samplingWindowHours: 12,
-      includeImageSignals: false,
-      expectedSecretionVolumeMl: 20,
-      oxygenSaturationThreshold: 93,
-      compareWithPreviousRun: true
-    }
-  };
-
   const escapeHtml = function (value) {
     return String(value || "")
       .replace(/&/g, "&amp;")
@@ -156,7 +127,7 @@
   };
 
   const validateCoreUriFields = function (state) {
-    const studyOk = validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+    const studyOk = validateUriInputField(state.studyUri, state.studyUriError, "Scenario URI");
     const processOk = validateUriInputField(state.processUri, state.processUriError, "Process URI");
     return studyOk && processOk;
   };
@@ -261,6 +232,154 @@
     window.setTimeout(function () {
       window.URL.revokeObjectURL(objectUrl);
     }, 0);
+  };
+
+  const base64EncodeUtf8 = function (value) {
+    try {
+      return window.btoa(unescape(encodeURIComponent(String(value || ""))));
+    } catch {
+      return "";
+    }
+  };
+
+  const decodeHtmlEntities = function (value) {
+    const source = String(value || "");
+    if (source === "") {
+      return "";
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.innerHTML = source;
+    return String(textarea.value || "").trim();
+  };
+
+  const normalizeHttpUrl = function (value) {
+    const raw = String(value || "").trim();
+    if (raw === "") {
+      return "";
+    }
+
+    if (isHttpUri(raw)) {
+      return raw;
+    }
+
+    if (raw.startsWith("/")) {
+      return window.location.origin.replace(/\/$/, "") + raw;
+    }
+
+    return "";
+  };
+
+  const resolveStdJsonDataEndpoint = function (state) {
+    const explicit = String(state && state.stdJsonDataEndpoint || "").trim();
+    if (explicit !== "") {
+      return explicit.replace(/\/$/, "");
+    }
+
+    const baseUrl = String(
+      drupalSettings
+      && drupalSettings.path
+      && drupalSettings.path.baseUrl
+      || "/"
+    );
+
+    const normalizedBase = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+    return normalizedBase + "/std/json-data";
+  };
+
+  const parseDownloadUrlFromOperations = function (operationsHtml) {
+    const html = String(operationsHtml || "");
+    if (html === "") {
+      return "";
+    }
+
+    const match = html.match(/data-download-url\s*=\s*"([^"]+)"/i);
+    if (!match || !match[1]) {
+      return "";
+    }
+
+    return normalizeHttpUrl(decodeHtmlEntities(match[1]));
+  };
+
+  const updateRunButtonState = function (state) {
+    if (!state || !state.runButton) {
+      return;
+    }
+
+    const selectedDatasetUri = String(state.datasetUri && state.datasetUri.value || "").trim();
+    const hasDataset = isHttpUri(selectedDatasetUri);
+    state.runButton.disabled = state.isRunning === true || !hasDataset;
+  };
+
+  const fetchScenarioDataAcquisitionFilesFromStd = async function (state, studyUri) {
+    if (!state || !isHttpUri(studyUri)) {
+      return [];
+    }
+
+    const encodedStudyUri = base64EncodeUtf8(studyUri);
+    if (encodedStudyUri === "") {
+      return [];
+    }
+
+    const endpointRoot = resolveStdJsonDataEndpoint(state);
+    if (endpointRoot === "") {
+      return [];
+    }
+
+    const endpoint = String(endpointRoot)
+      + "/" + encodedStudyUri + "/da/table/1/500/json";
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "GET",
+        credentials: "same-origin"
+      });
+
+      const payload = await parseResponsePayload(response);
+      if (!response.ok || !payload || !Array.isArray(payload.output)) {
+        return [];
+      }
+
+      const rows = payload.output;
+      const entries = [];
+
+      rows.forEach(function (row) {
+        if (!row || typeof row !== "object") {
+          return;
+        }
+
+        const fileNameRaw = decodeHtmlEntities(row.FileName || row.filename || row.name || "");
+        if (!fileNameRaw || !/\.csv$/i.test(fileNameRaw)) {
+          return;
+        }
+
+        let downloadUrl = parseDownloadUrlFromOperations(row.Operations || row.operations || "");
+        if (!isHttpUri(downloadUrl)) {
+          downloadUrl = normalizeHttpUrl(
+            "/std/download-file/"
+            + encodeURIComponent(base64EncodeUtf8(fileNameRaw))
+            + "/"
+            + encodeURIComponent(encodedStudyUri)
+            + "/da"
+          );
+        }
+
+        if (!isHttpUri(downloadUrl)) {
+          return;
+        }
+
+        entries.push({
+          uri: downloadUrl,
+          label: fileNameRaw,
+          filename: fileNameRaw,
+          source: "std-da-fallback"
+        });
+      });
+
+      return entries;
+    } catch {
+      return [];
+    }
   };
 
   const sanitizeFilenameSegment = function (value, fallback) {
@@ -401,58 +520,6 @@
     }
   };
 
-  const summarizeUris = function (label, values, key) {
-    const list = Array.isArray(values) ? values : [];
-    if (list.length === 0) {
-      return "<li><strong>" + escapeHtml(label) + ":</strong> 0</li>";
-    }
-
-    const preview = list.slice(0, 3).map(function (item) {
-      if (item && typeof item === "object") {
-        return String(item[key] || item.uri || item.filename || "").trim();
-      }
-      return String(item || "").trim();
-    }).filter(function (value) {
-      return value !== "";
-    });
-
-    let suffix = "";
-    if (list.length > preview.length) {
-      suffix = " (+" + (list.length - preview.length) + " more)";
-    }
-
-    return "<li><strong>" + escapeHtml(label) + ":</strong> "
-      + list.length
-      + (preview.length > 0 ? "<div class=\"ctt-r-uri-preview\">" + escapeHtml(preview.join(" | ")) + suffix + "</div>" : "")
-      + "</li>";
-  };
-
-  const renderAssociationsSummary = function (state, associations) {
-    if (!state.contextSummary) {
-      return;
-    }
-
-    if (!associations || typeof associations !== "object") {
-      state.contextSummary.className = "ctt-r-context-summary text-warning";
-      state.contextSummary.textContent = "Unable to resolve association context for this study.";
-      return;
-    }
-
-    const datasets = Array.isArray(associations.datasets) ? associations.datasets : [];
-    const variables = Array.isArray(associations.variables) ? associations.variables : [];
-    const images = Array.isArray(associations.images) ? associations.images : [];
-
-    const html = ""
-      + "<ul class=\"ctt-r-context-list\">"
-      + summarizeUris("Datasets", datasets, "uri")
-      + summarizeUris("Variables", variables, "uri")
-      + summarizeUris("Medical Images", images, "filename")
-      + "</ul>";
-
-    state.contextSummary.className = "ctt-r-context-summary";
-    state.contextSummary.innerHTML = html;
-  };
-
   const populateToolOptions = function (state, tools) {
     if (!state.toolUri) {
       return;
@@ -497,6 +564,148 @@
     }
   };
 
+  const populateDatasetOptions = function (state, datasets) {
+    if (!state || !state.datasetUri) {
+      return;
+    }
+
+    const selectedBeforeRefresh = String(state.datasetUri.value || "").trim();
+    const options = [];
+    const seen = {};
+
+    const datasetOptionKey = function (uri, label, filename) {
+      const normalizedFilename = String(filename || "").trim().toLowerCase();
+      if (normalizedFilename !== "") {
+        return "filename:" + normalizedFilename;
+      }
+
+      const normalizedLabel = String(label || "").trim().toLowerCase();
+      if (normalizedLabel !== "") {
+        return "label:" + normalizedLabel;
+      }
+
+      return "uri:" + String(uri || "").trim().toLowerCase();
+    };
+
+    const datasetUriPreferenceScore = function (uri) {
+      try {
+        const parsed = new URL(String(uri || ""));
+        const host = String(parsed.hostname || "").toLowerCase();
+        if (host === "localhost" || host === "127.0.0.1") {
+          return 3;
+        }
+        if (host === "host.docker.internal") {
+          return 2;
+        }
+      } catch {
+        // Keep default score for invalid URLs.
+      }
+      return 1;
+    };
+    if (!state.datasetFilenamesByUri || typeof state.datasetFilenamesByUri !== "object") {
+      state.datasetFilenamesByUri = {};
+    }
+    state.datasetFilenamesByUri = {};
+
+    if (Array.isArray(datasets)) {
+      datasets.forEach(function (entry) {
+        let uri = "";
+        let label = "";
+        let filename = "";
+
+        if (typeof entry === "string") {
+          uri = String(entry || "").trim();
+        } else if (entry && typeof entry === "object") {
+          uri = String(entry.uri || entry.downloadUrl || "").trim();
+          label = String(entry.label || "").trim();
+          filename = String(entry.filename || entry.name || entry.FileName || "").trim();
+        }
+
+        if (!isHttpUri(uri)) {
+          return;
+        }
+
+        const key = datasetOptionKey(uri, label, filename);
+        const existingIndex = Object.prototype.hasOwnProperty.call(seen, key)
+          ? Number(seen[key])
+          : -1;
+
+        if (existingIndex >= 0 && options[existingIndex]) {
+          const existing = options[existingIndex];
+          const existingScore = datasetUriPreferenceScore(existing.value);
+          const incomingScore = datasetUriPreferenceScore(uri);
+          if (incomingScore > existingScore) {
+            existing.value = uri;
+          }
+          if (String(existing.filename || "").trim() === "" && filename !== "") {
+            existing.filename = filename;
+          }
+          return;
+        }
+
+        seen[key] = options.length;
+        options.push({
+          value: uri,
+          label: label !== "" ? label : (filename !== "" ? filename : uri),
+          filename: filename
+        });
+      });
+    }
+
+    const extractDatasetTimestampValue = function (option) {
+      const filename = String(option && option.filename || "").trim();
+      const fallbackLabel = String(option && option.label || "").trim();
+      const source = (filename !== "" ? filename : fallbackLabel).toLowerCase();
+
+      // Expected DA naming includes ...-YYYYMMDD-HHMMSS(-SUFFIX).csv
+      const match = source.match(/-(\d{8})-(\d{6})(?:-[a-z0-9_-]+)?\.csv$/i);
+      if (!match) {
+        return 0;
+      }
+
+      const ymd = String(match[1] || "").trim();
+      const hms = String(match[2] || "").trim();
+      const numeric = Number(ymd + hms);
+      return Number.isFinite(numeric) ? numeric : 0;
+    };
+
+    options.sort(function (a, b) {
+      const timestampA = extractDatasetTimestampValue(a);
+      const timestampB = extractDatasetTimestampValue(b);
+      if (timestampA !== timestampB) {
+        return timestampB - timestampA;
+      }
+      return String(a.label || "").localeCompare(String(b.label || ""));
+    });
+
+    let html = '<option value="">Select one dataset</option>';
+    options.forEach(function (option) {
+      const normalizedFilename = String(option.filename || "").trim();
+      if (normalizedFilename !== "") {
+        state.datasetFilenamesByUri[String(option.value || "").trim()] = normalizedFilename;
+      }
+      html += '<option value="' + escapeHtml(option.value) + '" data-filename="' + escapeHtml(normalizedFilename) + '">' + escapeHtml(option.label) + '</option>';
+    });
+    state.datasetUri.innerHTML = html;
+
+    const availableByUri = {};
+    options.forEach(function (option) {
+      const uri = String(option.value || "").trim();
+      if (uri !== "") {
+        availableByUri[uri.toLowerCase()] = true;
+      }
+    });
+
+    const preferred = String(state.preferredDatasetUri || selectedBeforeRefresh || "").trim();
+    if (preferred !== "" && Object.prototype.hasOwnProperty.call(availableByUri, preferred.toLowerCase())) {
+      state.datasetUri.value = preferred;
+    } else {
+      state.datasetUri.value = "";
+    }
+
+    updateRunButtonState(state);
+  };
+
   const parseArguments = function (rawValue) {
     const source = String(rawValue || "").trim();
     if (source === "") {
@@ -520,16 +729,111 @@
     }
   };
 
-  const setOutputPayload = function (state, payload) {
+  const buildCreatedFilesRows = function (payload) {
+    if (!payload || typeof payload !== "object") {
+      return [];
+    }
+
+    const explicit = Array.isArray(payload.createdFiles) ? payload.createdFiles : [];
+    if (explicit.length > 0) {
+      return explicit.map(function (entry) {
+        return {
+          filename: String(entry && entry.filename || "").trim(),
+          fileType: String(entry && entry.fileType || "").trim(),
+          contentsPath: String(entry && entry.contentsPath || "").trim() || "Contents"
+        };
+      }).filter(function (row) {
+        return row.filename !== "";
+      });
+    }
+
+    const rows = [];
+    const outputRouting = payload.outputRouting && typeof payload.outputRouting === "object"
+      ? payload.outputRouting
+      : {};
+
+    const movedMedia = Array.isArray(outputRouting.movedMedia) ? outputRouting.movedMedia : [];
+    movedMedia.forEach(function (entry) {
+      const filename = String(entry && entry.filename || "").trim();
+      if (filename === "") {
+        return;
+      }
+      rows.push({
+        filename: filename,
+        fileType: "png",
+        contentsPath: "Contents > Media"
+      });
+    });
+
+    const keptDataFiles = Array.isArray(outputRouting.keptDataFiles) ? outputRouting.keptDataFiles : [];
+    keptDataFiles.forEach(function (filenameRaw) {
+      const filename = String(filenameRaw || "").trim();
+      if (filename === "") {
+        return;
+      }
+      const extParts = filename.split(".");
+      const fileType = extParts.length > 1 ? String(extParts[extParts.length - 1] || "").toLowerCase() : "data";
+      rows.push({
+        filename: filename,
+        fileType: fileType,
+        contentsPath: "Contents > Unassociated Data Files"
+      });
+    });
+
+    return rows;
+  };
+
+  const buildContentsInstructions = function (payload) {
+    const defaultInstructions = [
+      "Generated PNG charts are listed under Contents > Media.",
+      "Generated CSV statistics are listed under Contents > Unassociated Data Files."
+    ];
+
+    if (!payload || typeof payload !== "object" || !payload.contentsInstructions || typeof payload.contentsInstructions !== "object") {
+      return defaultInstructions;
+    }
+
+    const instructions = [];
+    ["media", "dataFiles"].forEach(function (key) {
+      const value = String(payload.contentsInstructions[key] || "").trim();
+      if (value !== "") {
+        instructions.push(value);
+      }
+    });
+
+    return instructions.length > 0 ? instructions : defaultInstructions;
+  };
+
+  const buildCompactResultPayload = function (payload, responseStatus) {
+    if (!payload || typeof payload !== "object") {
+      return payload;
+    }
+
+    const execution = payload.execution && typeof payload.execution === "object" ? payload.execution : {};
+    const summary = payload.summary && typeof payload.summary === "object" ? payload.summary : {};
+
+    return {
+      isSuccessful: payload.isSuccessful === true,
+      executed: payload.executed === true,
+      requestHttpStatus: responseStatus,
+      runId: String(execution.runId || ""),
+      backendEndpoint: String(execution.backendEndpoint || ""),
+      errors: Number(summary.errorCount || 0),
+      warnings: Number(summary.warningCount || 0),
+      filesCreated: buildCreatedFilesRows(payload),
+      contentsInstructions: buildContentsInstructions(payload)
+    };
+  };
+
+  const setOutputPayload = function (state, payload, responseStatus) {
     if (!state.output) {
       return;
     }
 
-    try {
-      state.output.textContent = JSON.stringify(payload, null, 2);
-    } catch {
-      state.output.textContent = String(payload || "");
-    }
+    // Keep response details in the diagnostics card only.
+    state.output.textContent = "";
+    state.output.classList.add("d-none");
+    state.output.setAttribute("aria-hidden", "true");
   };
 
   const resetDiagnostics = function (state, message) {
@@ -545,7 +849,7 @@
   const buildRecommendation = function (issueCodes, isSuccessful) {
     const codes = Array.isArray(issueCodes) ? issueCodes : [];
     if (codes.indexOf("upstream_endpoint_not_found") !== -1) {
-      return "Upstream execute endpoint is not deployed yet. Continue with validate-only and share payload evidence with API team.";
+      return "Upstream execute endpoint is not deployed yet. Share payload evidence with the API team.";
     }
     if (codes.indexOf("r_backend_unavailable") !== -1) {
       return "Backend connection is unavailable. Confirm API base URL and HASCOAPI deployment status.";
@@ -641,16 +945,45 @@
       }
     }
 
+    const createdRows = buildCreatedFilesRows(payload);
+    let createdFilesHtml = "<p class=\"ctt-r-diagnostics-note\">No generated files reported for this run.</p>";
+    if (createdRows.length > 0) {
+      const tableRows = createdRows.map(function (row) {
+        return "<tr>"
+          + "<td class=\"ctt-r-break-all\">" + escapeHtml(row.filename) + "</td>"
+          + "<td>" + escapeHtml(row.fileType || "data") + "</td>"
+          + "<td>" + escapeHtml(row.contentsPath || "Contents") + "</td>"
+          + "</tr>";
+      }).join("");
+
+      createdFilesHtml = ""
+        + "<div class=\"table-responsive\">"
+        + "<table class=\"table table-sm table-bordered mb-2\">"
+        + "<thead><tr><th>File</th><th>Type</th><th>Where In Contents</th></tr></thead>"
+        + "<tbody>" + tableRows + "</tbody>"
+        + "</table>"
+        + "</div>";
+    }
+
+    const instructionItems = buildContentsInstructions(payload);
+    const instructionsHtml = "<ul class=\"ctt-r-diagnostics-issues\">"
+      + instructionItems.map(function (item) {
+        return "<li>" + escapeHtml(item) + "</li>";
+      }).join("")
+      + "</ul>";
+
     state.diagnostics.className = "ctt-r-diagnostics";
     state.diagnostics.innerHTML = ""
       + "<div class=\"ctt-r-diagnostics-status\">"
       + "<span class=\"ctt-r-badge " + statusClass + "\">Execution " + escapeHtml(statusLabel) + "</span> "
-      + "<span class=\"ctt-r-badge ctt-r-badge-neutral\">" + (validateOnly ? "validate-only" : "execute") + "</span>"
+      + "<span class=\"ctt-r-badge ctt-r-badge-neutral\">" + (validateOnly ? "not executed" : "executed") + "</span>"
       + "</div>"
       + "<div class=\"ctt-r-diagnostics-grid\">" + gridHtml + "</div>"
       + "<div class=\"ctt-r-diagnostics-section\"><div class=\"ctt-r-diagnostics-key\">Backend endpoint</div><div class=\"ctt-r-diagnostics-value ctt-r-break-all\">" + escapeHtml(backendEndpoint) + "</div></div>"
       + "<div class=\"ctt-r-diagnostics-section\"><div class=\"ctt-r-diagnostics-key\">Issue codes</div><div class=\"ctt-r-diagnostics-codes\">" + codeBadges + "</div></div>"
       + "<div class=\"ctt-r-diagnostics-section\"><div class=\"ctt-r-diagnostics-key\">Recommendation</div><p class=\"ctt-r-diagnostics-note\">" + escapeHtml(recommendation) + "</p></div>"
+        + "<div class=\"ctt-r-diagnostics-section\"><div class=\"ctt-r-diagnostics-key\">Files Created</div>" + createdFilesHtml + "</div>"
+        + "<div class=\"ctt-r-diagnostics-section\"><div class=\"ctt-r-diagnostics-key\">Where To Find Them</div>" + instructionsHtml + "</div>"
       + "<div class=\"ctt-r-diagnostics-section\"><div class=\"ctt-r-diagnostics-key\">Issue details</div>" + issueHtml + "</div>";
   };
 
@@ -1130,8 +1463,7 @@
         toolUri: String(state.toolUri && state.toolUri.value || "").trim(),
         entrypoint: String(state.entrypoint && state.entrypoint.value || "").trim(),
         argumentsJson: String(state.argumentsJson && state.argumentsJson.value || ""),
-        validateOnly: Boolean(state.validateOnly && state.validateOnly.checked),
-        templateKey: String(state.templateSelect && state.templateSelect.value || "").trim()
+        datasetUri: String(state.datasetUri && state.datasetUri.value || "").trim()
       };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
     } catch {
@@ -1151,14 +1483,11 @@
     if (state.processUri && String(state.processUri.value || "").trim() === "" && isHttpUri(saved.processUri)) {
       state.processUri.value = String(saved.processUri).trim();
     }
-    if (state.entrypoint && String(state.entrypoint.value || "").trim() === "" && typeof saved.entrypoint === "string") {
-      state.entrypoint.value = saved.entrypoint;
-    }
     if (state.argumentsJson && String(state.argumentsJson.value || "").trim() === "" && typeof saved.argumentsJson === "string") {
       state.argumentsJson.value = saved.argumentsJson;
     }
-    if (state.validateOnly && typeof saved.validateOnly === "boolean") {
-      state.validateOnly.checked = saved.validateOnly;
+    if (state.datasetUri && typeof saved.datasetUri === "string") {
+      state.preferredDatasetUri = String(saved.datasetUri || "").trim();
     }
 
     const toolUri = String(saved.toolUri || "").trim();
@@ -1166,17 +1495,6 @@
       state.preferredToolUri = toolUri;
     }
 
-    if (state.templateSelect) {
-      const templateKey = String(saved.templateKey || "").trim();
-      if (templateKey !== "") {
-        const hasTemplateOption = Array.from(state.templateSelect.options || []).some(function (option) {
-          return String(option.value || "") === templateKey;
-        });
-        if (hasTemplateOption) {
-          state.templateSelect.value = templateKey;
-        }
-      }
-    }
   };
 
   const clearSavedContext = function (state) {
@@ -1194,10 +1512,6 @@
     state.uriHistory = createEmptyUriHistory();
     state.autocompleteDisplayByUri = {};
     refreshUriSuggestions(state);
-    if (state.templateSelect) {
-      state.templateSelect.value = "";
-    }
-
     updateDownloadLogButtonState(state);
 
     setFeedback(state, "success", "Saved browser context cleared for this page.");
@@ -1207,17 +1521,20 @@
     const studyUri = normalizeUriInput(state.studyUri && state.studyUri.value || "");
     const processUri = normalizeUriInput(state.processUri && state.processUri.value || "");
     const toolUri = String(state.toolUri && state.toolUri.value || "").trim();
-    const entrypoint = String(state.entrypoint && state.entrypoint.value || "").trim();
-    const validateOnly = Boolean(state.validateOnly && state.validateOnly.checked);
+    const datasetUri = String(state.datasetUri && state.datasetUri.value || "").trim();
+    const validateOnly = false;
 
     if (!isHttpUri(studyUri)) {
-      return { ok: false, message: "Provide a valid Study selection (name [URI] or URI)." };
+      return { ok: false, message: "Provide a valid Scenario selection (name [URI] or URI)." };
     }
     if (!isHttpUri(processUri)) {
       return { ok: false, message: "Provide a valid Process selection (name [URI] or URI)." };
     }
     if (!isHttpUri(toolUri)) {
       return { ok: false, message: "Select a valid R tool URI from repository context." };
+    }
+    if (!isHttpUri(datasetUri)) {
+      return { ok: false, message: "Select one valid dataset from the Scenario dataset input list." };
     }
 
     const parsedArguments = parseArguments(state.argumentsJson && state.argumentsJson.value || "");
@@ -1235,36 +1552,26 @@
       arguments: parsedArguments.value,
       validateOnly: validateOnly
     };
-    if (entrypoint !== "") {
-      requestPayload.entrypoint = entrypoint;
+
+    const selectedDatasetLabel = state.datasetUri
+      ? String(state.datasetUri.options[state.datasetUri.selectedIndex] && state.datasetUri.options[state.datasetUri.selectedIndex].text || "").trim()
+      : "";
+
+    requestPayload.arguments.selectedDatasetUri = datasetUri;
+    if (selectedDatasetLabel !== "") {
+      requestPayload.arguments.selectedDatasetLabel = selectedDatasetLabel;
+    }
+    const selectedDatasetFilename = state.datasetFilenamesByUri
+      ? String(state.datasetFilenamesByUri[datasetUri] || "").trim()
+      : "";
+    if (selectedDatasetFilename !== "") {
+      requestPayload.arguments.selectedDatasetFilename = selectedDatasetFilename;
     }
 
     return {
       ok: true,
       payload: requestPayload
     };
-  };
-
-  const applyTemplate = function (state) {
-    if (!state.templateSelect || !state.argumentsJson) {
-      return;
-    }
-
-    const templateKey = String(state.templateSelect.value || "").trim();
-    if (templateKey === "") {
-      setFeedback(state, "warning", "Choose a template before applying it.");
-      return;
-    }
-
-    const templatePayload = ARGUMENT_TEMPLATES[templateKey];
-    if (!templatePayload || typeof templatePayload !== "object") {
-      setFeedback(state, "error", "Selected template is not available.");
-      return;
-    }
-
-    state.argumentsJson.value = JSON.stringify(templatePayload, null, 2);
-    saveContext(state);
-    setFeedback(state, "success", "Argument template applied to the JSON editor.");
   };
 
   const bindPersistenceEvents = function (state) {
@@ -1280,7 +1587,7 @@
 
     bind(state.studyUri, "input", function () {
       scheduleAutocompleteSuggestions(state, "study");
-      validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+      validateUriInputField(state.studyUri, state.studyUriError, "Scenario URI");
       saveContext(state);
     });
     bind(state.processUri, "input", function () {
@@ -1291,7 +1598,7 @@
     bind(state.studyUri, "change", function () {
       normalizeInputElementValueToUri(state.studyUri);
       normalizeInputElementValueToUri(state.processUri);
-      validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+      validateUriInputField(state.studyUri, state.studyUriError, "Scenario URI");
       validateUriInputField(state.processUri, state.processUriError, "Process URI");
       rememberDisplayValueFromInput(state, state.studyUri ? state.studyUri.value : "");
       rememberDisplayValueFromInput(state, state.processUri ? state.processUri.value : "");
@@ -1317,10 +1624,12 @@
       scheduleAutocompleteSuggestions(state, "process");
       saveContext(state);
     });
-    bind(state.entrypoint, "input", saveHandler);
-    bind(state.validateOnly, "change", saveHandler);
     bind(state.argumentsJson, "input", saveHandler);
-    bind(state.templateSelect, "change", saveHandler);
+    bind(state.datasetUri, "change", function () {
+      state.preferredDatasetUri = String(state.datasetUri && state.datasetUri.value || "").trim();
+      updateRunButtonState(state);
+      saveContext(state);
+    });
 
     bind(state.toolUri, "change", function () {
       state.preferredToolUri = String(state.toolUri && state.toolUri.value || "").trim();
@@ -1329,7 +1638,7 @@
 
     bind(state.studyUri, "blur", function () {
       normalizeInputElementValueToUri(state.studyUri);
-      validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+      validateUriInputField(state.studyUri, state.studyUriError, "Scenario URI");
       saveContext(state);
     });
 
@@ -1342,14 +1651,14 @@
 
   const loadRealContext = async function (state) {
     if (!validateCoreUriFields(state)) {
-      setFeedback(state, "warning", "Fix Study/Process fields before loading context.");
+      setFeedback(state, "warning", "Fix Scenario/Process fields before loading context.");
       return;
     }
 
     const studyUri = normalizeUriInput(state.studyUri && state.studyUri.value || "");
     const processUri = normalizeUriInput(state.processUri && state.processUri.value || "");
     if (!isHttpUri(studyUri)) {
-      setFeedback(state, "warning", "Provide a valid Study selection (name [URI] or URI) before loading context.");
+      setFeedback(state, "warning", "Provide a valid Scenario selection (name [URI] or URI) before loading context.");
       return;
     }
 
@@ -1394,13 +1703,23 @@
       });
       const associationsPayload = await parseResponsePayload(associationsResponse);
       if (!associationsResponse.ok || !associationsPayload || associationsPayload.isValid === false) {
-        const message = firstIssueMessage(associationsPayload, "Unable to load study associations.");
+        const message = firstIssueMessage(associationsPayload, "Unable to load Scenario datasets.");
         setFeedback(state, "error", message);
         return;
       }
 
       state.currentAssociations = associationsPayload.associations || {};
-      renderAssociationsSummary(state, state.currentAssociations);
+      const associatedDatasets = Array.isArray(state.currentAssociations.datasets) ? state.currentAssociations.datasets : [];
+      const scenarioDataAcquisitionFiles = Array.isArray(associationsPayload.studyDataAcquisitionFiles)
+        ? associationsPayload.studyDataAcquisitionFiles
+        : [];
+
+      const stdFallbackDatasetFiles = await fetchScenarioDataAcquisitionFilesFromStd(state, studyUri);
+      const allDatasets = associatedDatasets
+        .concat(scenarioDataAcquisitionFiles)
+        .concat(stdFallbackDatasetFiles);
+
+      populateDatasetOptions(state, allDatasets);
 
       let processUriForContext = normalizeUriInput(state.processUri && state.processUri.value || "");
       if (!isHttpUri(processUriForContext)) {
@@ -1418,12 +1737,14 @@
       saveContext(state);
 
       if (Object.keys(state.toolsByUri).length === 0) {
-        setFeedback(state, "warning", "No R tools were found for the selected study context.");
+        setFeedback(state, "warning", "No R tools were found for the selected Scenario context.");
+      } else if (!state.datasetUri || String(state.datasetUri.value || "").trim() === "") {
+        setFeedback(state, "warning", "Select one dataset to use as R input.");
       } else {
-        setFeedback(state, "success", "Real context loaded: R tools and study associations are ready.");
+        setFeedback(state, "success", "R tools and Scenario datasets are ready for the selected context.");
       }
     } catch {
-      setFeedback(state, "error", "Failed to load real context data.");
+      setFeedback(state, "error", "Failed to load R tool context.");
     }
   };
 
@@ -1434,7 +1755,7 @@
     }
 
     if (!validateCoreUriFields(state)) {
-      setFeedback(state, "warning", "Fix Study/Process fields before running validation or execution.");
+      setFeedback(state, "warning", "Fix Scenario/Process fields before running validation or execution.");
       return;
     }
 
@@ -1450,7 +1771,6 @@
     }
 
     const requestPayload = built.payload;
-    const validateOnly = Boolean(requestPayload.validateOnly);
     state.lastRequestPayload = requestPayload;
     rememberUriContext(state, requestPayload.studyUri, requestPayload.processUri);
     saveContext(state);
@@ -1460,7 +1780,7 @@
 
     if (state.runButton) {
       state.runButton.disabled = true;
-      state.runButton.textContent = validateOnly ? "Validating..." : "Running...";
+      state.runButton.textContent = "Running...";
     }
     if (state.downloadLogButton) {
       state.downloadLogButton.disabled = true;
@@ -1481,14 +1801,14 @@
       state.lastExecutionPayload = payload;
       state.lastExecutionHttpStatus = response.status;
       updateDownloadLogButtonState(state);
-      setOutputPayload(state, payload);
+      setOutputPayload(state, payload, response.status);
       renderDiagnostics(state, payload, response.status);
 
       if (response.ok && payload && payload.isSuccessful === true) {
-        if (payload.executed === false || validateOnly) {
-          setFeedback(state, "success", "Validation completed. The upstream R executor was not called.");
-        } else {
+        if (payload.executed === true) {
           setFeedback(state, "success", "R analysis executed with real backend response.");
+        } else {
+          setFeedback(state, "warning", "Execution request completed but upstream R executor was not called.");
         }
       } else {
         let message = firstIssueMessage(payload, "R analysis execution failed.");
@@ -1498,7 +1818,7 @@
           : "";
 
         if (issueCode === "upstream_endpoint_not_found") {
-          message += " Upstream endpoint not available yet; continue with validate-only mode until API deployment.";
+          message += " Upstream endpoint not available yet; verify API deployment and retry.";
         } else if (issueCode === "r_backend_unavailable") {
           message += " R backend unavailable; confirm API base URL and backend service status.";
         }
@@ -1516,9 +1836,9 @@
     } finally {
       state.isRunning = false;
       if (state.runButton) {
-        state.runButton.disabled = false;
         state.runButton.textContent = originalRunButtonText;
       }
+      updateRunButtonState(state);
       saveContext(state);
     }
   };
@@ -1589,6 +1909,7 @@
           toolsEndpoint: String(settings.toolsEndpoint || "").trim(),
           associationsEndpoint: String(settings.associationsEndpoint || "").trim(),
           statusEndpoint: String(settings.statusEndpoint || "").trim(),
+          stdJsonDataEndpoint: String(settings.stdJsonDataEndpoint || "").trim(),
           executeEndpoint: String(settings.executeEndpoint || "").trim(),
           studyAutocompleteEndpoint: String(settings.studyAutocompleteEndpoint || "").trim(),
           processAutocompleteEndpoint: String(settings.processAutocompleteEndpoint || "").trim(),
@@ -1601,17 +1922,10 @@
           studyUriSuggestions: root.querySelector("#ctt-r-study-uri-suggestions"),
           processUriSuggestions: root.querySelector("#ctt-r-process-uri-suggestions"),
           toolUri: root.querySelector("#ctt-r-tool-uri"),
-          entrypoint: root.querySelector("#ctt-r-entrypoint"),
-          validateOnly: root.querySelector("#ctt-r-validate-only"),
+          datasetUri: root.querySelector("#ctt-r-dataset-uri"),
           argumentsJson: root.querySelector("#ctt-r-arguments-json"),
-          templateSelect: root.querySelector("#ctt-r-argument-template"),
-          applyTemplateButton: root.querySelector("#ctt-r-apply-template"),
-          clearSavedContextButton: root.querySelector("#ctt-r-clear-saved-context"),
-          loadContextButton: root.querySelector("#ctt-r-load-context"),
           runButton: root.querySelector("#ctt-r-run-analysis"),
-          copyPayloadButton: root.querySelector("#ctt-r-copy-payload"),
           downloadLogButton: root.querySelector("#ctt-r-download-log"),
-          contextSummary: root.querySelector("#ctt-r-context-summary"),
           diagnostics: root.querySelector("#ctt-r-exec-diagnostics"),
           output: root.querySelector("#ctt-r-response-output"),
           uriHistory: loadUriHistory(),
@@ -1625,14 +1939,24 @@
             process: ""
           },
           toolsByUri: {},
+          datasetFilenamesByUri: {},
           currentAssociations: {},
           preferredToolUri: "",
+          preferredDatasetUri: "",
           lastRequestPayload: null,
           lastExecutionPayload: null,
           lastExecutionHttpStatus: null,
           bootstrapSuggestionsLoaded: false,
           isRunning: false
         };
+
+        if (state.output) {
+          state.output.textContent = "";
+          state.output.classList.add("d-none");
+          state.output.setAttribute("aria-hidden", "true");
+        }
+
+        state.preferredToolUri = String(settings.initialToolUri || "").trim();
 
         ensureFeedbackUi(state);
         if (state.feedbackClose) {
@@ -1657,46 +1981,19 @@
         );
         refreshUriSuggestions(state);
         bindPersistenceEvents(state);
-        validateUriInputField(state.studyUri, state.studyUriError, "Study URI");
+        validateUriInputField(state.studyUri, state.studyUriError, "Scenario URI");
         validateUriInputField(state.processUri, state.processUriError, "Process URI");
         resetDiagnostics(state, "Run validation or execution to view diagnostics summary.");
         bootstrapUriSuggestionsFromBackend(state);
         scheduleAutocompleteSuggestions(state, "study");
         scheduleAutocompleteSuggestions(state, "process");
         updateDownloadLogButtonState(state);
-
-        if (state.loadContextButton) {
-          state.loadContextButton.addEventListener("click", function (event) {
-            event.preventDefault();
-            loadRealContext(state);
-          });
-        }
+        updateRunButtonState(state);
 
         if (state.form) {
           state.form.addEventListener("submit", function (event) {
             event.preventDefault();
             runAnalysis(state);
-          });
-        }
-
-        if (state.applyTemplateButton) {
-          state.applyTemplateButton.addEventListener("click", function (event) {
-            event.preventDefault();
-            applyTemplate(state);
-          });
-        }
-
-        if (state.clearSavedContextButton) {
-          state.clearSavedContextButton.addEventListener("click", function (event) {
-            event.preventDefault();
-            clearSavedContext(state);
-          });
-        }
-
-        if (state.copyPayloadButton) {
-          state.copyPayloadButton.addEventListener("click", function (event) {
-            event.preventDefault();
-            copyRequestPayload(state);
           });
         }
 

@@ -16,11 +16,6 @@ ctt.tools_repository:
   parent: system.admin_structure
   weight: 12
 
-ctt.r_analysis:
-  title: 'R Analysis Interface'
-  route_name: ctt.r_analysis
-  parent: system.admin_structure
-  weight: 13
 
 ctt.tools_repository_main:
   title: 'Analytical Tool Collection'
@@ -28,13 +23,6 @@ ctt.tools_repository_main:
   parent: std.manage_top_level
   menu_name: main
   weight: 24
-
-ctt.r_analysis_main:
-  title: 'Workflow R Analysis'
-  route_name: ctt.r_analysis
-  parent: std.manage_top_level
-  menu_name: main
-  weight: 25
 
 ctt.settings:
   title: 'CTT Editor Settings'

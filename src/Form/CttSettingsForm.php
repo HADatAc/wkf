@@ -105,8 +105,8 @@ class CttSettingsForm extends ConfigFormBase {
     $form['r_analysis_endpoint_path'] = [
       '#type' => 'textfield',
       '#title' => $this->t('R analysis endpoint path'),
-      '#description' => $this->t('Relative hascoapi path used for real R execution requests (example: /hascoapi/api/r-analysis/execute).'),
-      '#default_value' => $config->get('r_analysis_endpoint_path') ?: '/hascoapi/api/r-analysis/execute',
+      '#description' => $this->t('Relative hascoapi path used for real R execution requests (example: /hascoapi/api/r-analysis/engine/run).'),
+      '#default_value' => $config->get('r_analysis_endpoint_path') ?: '/hascoapi/api/r-analysis/engine/run',
       '#required' => TRUE,
     ];
 

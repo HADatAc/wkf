@@ -24,7 +24,7 @@ ctt.tools_repository:
   path: '/workflow/tools-repository'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttEditorController::toolsRepositoryPage'
-    _title: 'Analytical Tool Collection'
+    _title_callback: '\Drupal\ctt\Controller\CttEditorController::toolsRepositoryTitle'
   requirements:
     _user_is_logged_in: 'TRUE'
   options:
@@ -34,7 +34,7 @@ ctt.r_analysis:
   path: '/workflow/r-analysis'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttEditorController::rAnalysisPage'
-    _title: 'R Analysis Interface'
+    _title_callback: '\Drupal\ctt\Controller\CttEditorController::rAnalysisTitle'
   requirements:
     _permission: 'submit ctt workflow'
   options:
@@ -272,6 +272,15 @@ ctt.api.instrument.list:
   path: '/workflow/api/instrument/list'
   defaults:
     _controller: '\Drupal\ctt\Controller\CttApiController::listInstruments'
+  requirements:
+    _permission: 'access ctt editor'
+  options:
+    no_cache: TRUE
+
+ctt.api.instrument.prefilter:
+  path: '/workflow/api/instrument/prefilter'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::listOrganizationScopedInstruments'
   requirements:
     _permission: 'access ctt editor'
   options:

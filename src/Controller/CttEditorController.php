@@ -444,9 +444,18 @@ class CttEditorController extends ControllerBase {
     try {
       $api = \Drupal::service('rep.api_connector');
       $pageSize = 100;
-      $maxPages = 12;
+      $maxPages = 8;
+      $deadline = microtime(TRUE) + 8.0;
+      $maxInstrumentInstanceLookups = 180;
+      $instrumentInstanceLookups = 0;
+      $timedOut = FALSE;
 
       for ($page = 0; $page < $maxPages; $page++) {
+        if (microtime(TRUE) >= $deadline) {
+          $timedOut = TRUE;
+          break;
+        }
+
         $offset = $page * $pageSize;
         $raw = $api->listByKeyword('deployment', '_', $pageSize, $offset);
         $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
@@ -456,6 +465,11 @@ class CttEditorController extends ControllerBase {
         }
 
         foreach ($chunk as $deployment) {
+          if (microtime(TRUE) >= $deadline) {
+            $timedOut = TRUE;
+            break 2;
+          }
+
           if (!is_object($deployment)) {
             continue;
           }
@@ -484,8 +498,14 @@ class CttEditorController extends ControllerBase {
           }
 
           if (!array_key_exists($instrumentInstanceUri, $instrumentInstanceCache)) {
+            if ($instrumentInstanceLookups >= $maxInstrumentInstanceLookups) {
+              $timedOut = TRUE;
+              break 2;
+            }
+
             $resolvedInstrumentUri = '';
             try {
+              $instrumentInstanceLookups++;
               $instrumentInstance = $api->parseObjectResponse($api->getUri($instrumentInstanceUri), 'getUri');
               if (is_object($instrumentInstance)) {
                 if (isset($instrumentInstance->typeUri) && is_string($instrumentInstance->typeUri)) {
@@ -522,6 +542,10 @@ class CttEditorController extends ControllerBase {
           break;
         }
       }
+
+      if ($timedOut) {
+        \Drupal::logger('ctt')->warning('Instrument selection availability scan stopped early (time/call budget reached).');
+      }
     }
     catch (\Throwable $ignored) {
       return [
@@ -548,7 +572,38 @@ class CttEditorController extends ControllerBase {
     $organization = $this->resolveCurrentUserOrganizationContext($studyUri);
     $organizationScopeUris = $this->resolveOrganizationScopeUris((string) ($organization['organizationUri'] ?? ''));
     $platformDetails = $this->resolveOrganizationPlatformInstances($organizationScopeUris);
-    $availability = $this->resolveAllowedInstrumentUrisByPlatforms($platformDetails);
+
+    $availability = [
+      'allowedInstrumentUris' => [],
+      'platformInstrumentUris' => [],
+    ];
+
+    $cacheSeed = [
+      'organizationUri' => (string) ($organization['organizationUri'] ?? ''),
+      'platformUris' => array_values(array_keys($platformDetails)),
+    ];
+    sort($cacheSeed['platformUris']);
+
+    $availabilityCacheKey = 'ctt.instrument_selection.availability.' . sha1(json_encode($cacheSeed));
+    $cachedAvailability = \Drupal::state()->get($availabilityCacheKey, []);
+    if (is_array($cachedAvailability)) {
+      $cachedAt = (int) ($cachedAvailability['cached_at'] ?? 0);
+      $cachedData = $cachedAvailability['data'] ?? NULL;
+      if ($cachedAt > 0 && (time() - $cachedAt) <= 300 && is_array($cachedData)) {
+        $availability = [
+          'allowedInstrumentUris' => is_array($cachedData['allowedInstrumentUris'] ?? NULL) ? array_values($cachedData['allowedInstrumentUris']) : [],
+          'platformInstrumentUris' => is_array($cachedData['platformInstrumentUris'] ?? NULL) ? $cachedData['platformInstrumentUris'] : [],
+        ];
+      }
+    }
+
+    if (empty($availability['allowedInstrumentUris']) && !empty($platformDetails)) {
+      $availability = $this->resolveAllowedInstrumentUrisByPlatforms($platformDetails);
+      \Drupal::state()->set($availabilityCacheKey, [
+        'cached_at' => time(),
+        'data' => $availability,
+      ]);
+    }
 
     $platformOptions = [];
     foreach ($platformDetails as $platformUri => $details) {
@@ -609,6 +664,53 @@ class CttEditorController extends ControllerBase {
       }
       catch (\Throwable $ignored) {
       }
+    }
+
+    return '';
+  }
+
+  /**
+   * Resolve current user Person URI for ownership defaults.
+   */
+  protected function resolveCurrentUserPersonUri(): string {
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return '';
+    }
+
+    $userEmail = '';
+    try {
+      $user = \Drupal\user\Entity\User::load($this->currentUser()->id());
+      if ($user && is_string($user->getEmail())) {
+        $userEmail = trim((string) $user->getEmail());
+      }
+    }
+    catch (\Throwable $ignored) {
+      $userEmail = '';
+    }
+
+    if ($userEmail === '') {
+      return '';
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $peopleRaw = $api->listByManagerEmail('person', $userEmail, 50, 0);
+      $peopleParsed = $api->parseObjectResponse($peopleRaw, 'listByManagerEmail');
+      $people = $this->normalizeApiListPayload($peopleParsed);
+
+      foreach ($people as $person) {
+        if (!is_object($person)) {
+          continue;
+        }
+
+        $uri = trim((string) ($person->uri ?? $person->hasURI ?? ''));
+        if ($this->isUri($uri)) {
+          return $uri;
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      return '';
     }
 
     return '';
@@ -1167,6 +1269,24 @@ class CttEditorController extends ControllerBase {
   }
 
   /**
+   * Dynamic page title for analytical tools repository and editor pages.
+   */
+  public function toolsRepositoryTitle(): string {
+    $request = \Drupal::request();
+    $editorMode = $this->isTruthyFlag((string) $request->query->get('editor', ''));
+    if (!$editorMode) {
+      return (string) $this->t('Analytical Tool Collection');
+    }
+
+    $editorToolUri = trim((string) $request->query->get('toolUri', ''));
+    if ($editorToolUri !== '') {
+      return (string) $this->t('Analytical Tool Collection > Edit Tool');
+    }
+
+    return (string) $this->t('Analytical Tool Collection > Add Tool');
+  }
+
+  /**
    * Render analytical tools repository management page.
    */
   public function toolsRepositoryPage(): array {
@@ -1174,8 +1294,22 @@ class CttEditorController extends ControllerBase {
     $drupalBaseUrl = ($basePath === '' ? '/' : $basePath . '/');
     $endpoint = $drupalBaseUrl . 'workflow/api/repo/analytical-tools';
     $processListEndpoint = $drupalBaseUrl . 'workflow/api/process/list';
+    $processAutocompleteEndpoint = $drupalBaseUrl . 'workflow/api/r-analysis/autocomplete/process';
     $initialStudyUri = trim((string) \Drupal::request()->query->get('studyUri', ''));
     $initialProcessUri = trim((string) \Drupal::request()->query->get('processUri', ''));
+    $initialScenarioName = trim((string) \Drupal::request()->query->get('scenarioName', ''));
+    $initialProcessName = trim((string) \Drupal::request()->query->get('processName', ''));
+    $initialToolUri = trim((string) \Drupal::request()->query->get('toolUri', ''));
+    $initialStudyLabel = $this->resolveLabelByUri($initialStudyUri);
+    $initialProcessLabel = $this->resolveLabelByUri($initialProcessUri);
+    if ($initialScenarioName !== '') {
+      $initialStudyLabel = $initialScenarioName;
+    }
+    if ($initialProcessName !== '') {
+      $initialProcessLabel = $initialProcessName;
+    }
+    $initialStudyDisplayValue = $initialStudyLabel !== '' ? $initialStudyLabel : (string) $this->t('Scenario');
+    $initialProcessDisplayValue = $initialProcessLabel !== '' ? $initialProcessLabel : (string) $this->t('Process');
     $initialScenarioUri = trim((string) \Drupal::request()->query->get('scenarioUri', ''));
     $initialOwner = trim((string) \Drupal::request()->query->get('owner', ''));
     $initialLanguage = strtolower(trim((string) \Drupal::request()->query->get('language', '')));
@@ -1188,6 +1322,35 @@ class CttEditorController extends ControllerBase {
 
     $editorMode = $this->isTruthyFlag((string) \Drupal::request()->query->get('editor', ''));
     $editorToolUri = trim((string) \Drupal::request()->query->get('toolUri', ''));
+    $isEditMode = $editorMode && ($editorToolUri !== '');
+    $editorHeading = $isEditMode
+      ? (string) $this->t('Analytical Tool Collection > Edit Tool')
+      : (string) $this->t('Analytical Tool Collection > Add Tool');
+
+    $currentUserEmail = '';
+    try {
+      $user = \Drupal\user\Entity\User::load($this->currentUser()->id());
+      if ($user && is_string($user->getEmail())) {
+        $currentUserEmail = trim((string) $user->getEmail());
+      }
+    }
+    catch (\Throwable $ignored) {
+      $currentUserEmail = '';
+    }
+
+    $userOrganizationContext = $this->resolveCurrentUserOrganizationContext($initialStudyUri);
+    $currentUserInstitutionUri = trim((string) ($userOrganizationContext['organizationUri'] ?? ''));
+    $currentUserInstitutionLabel = trim((string) ($userOrganizationContext['organizationLabel'] ?? ''));
+    $currentUserPersonUri = $this->resolveCurrentUserPersonUri();
+
+    $initialProcessLabel = '';
+    if ($this->isUri($initialProcessUri)) {
+      $initialProcessLabel = $this->resolveLabelByUri($initialProcessUri);
+    }
+    $initialProcessDisplayValue = $initialProcessUri;
+    if ($initialProcessLabel !== '') {
+      $initialProcessDisplayValue = $initialProcessLabel . ' [' . $initialProcessUri . ']';
+    }
 
     $baseCollectionQuery = [];
     if ($initialStudyUri !== '') {
@@ -1494,7 +1657,7 @@ class CttEditorController extends ControllerBase {
       . ($editorMode ? ''
       . '  <section class="card mb-3">'
       . '    <div class="card-header d-flex justify-content-between align-items-center">'
-      . '      <strong>' . Html::escape((string) $this->t('Add / Edit Analytical Tool')) . '</strong>'
+      . '      <strong>' . Html::escape($editorHeading) . '</strong>'
       . '      <div style="display:flex;gap:.5rem;align-items:center;">'
       . '        <a class="btn btn-sm btn-outline-secondary" href="' . Html::escape($collectionPageUrl) . '">' . Html::escape((string) $this->t('Back to Collection')) . '</a>'
       . '      </div>'
@@ -1502,61 +1665,32 @@ class CttEditorController extends ControllerBase {
       . '    <div class="card-body">'
       . '      <form id="ctt-tools-editor-form" class="row g-2">'
       . '        <input type="hidden" id="ctt-tool-uri" value="">'
-      . '        <div class="col-md-4">'
-      . '          <label for="ctt-tool-name" class="form-label">' . Html::escape((string) $this->t('Name')) . '</label>'
-      . '          <input type="text" id="ctt-tool-name" class="form-control" required>'
+      . '        <input type="hidden" id="ctt-tool-process-uri" value="' . Html::escape($initialProcessUri) . '">'
+      . '        <div class="col-md-12">'
+      . '          <label for="ctt-tool-source-file" class="form-label">' . Html::escape((string) $this->t('Tool Source File')) . '</label>'
+      . '          <input type="file" id="ctt-tool-source-file" class="form-control" accept=".R,.r,.py,.sql,.txt,.json,.yaml,.yml,.sh,.js,.ts">'
+      . '          <small class="text-muted">' . Html::escape((string) $this->t('Tool label and language are inferred from the selected filename.')) . '</small>'
       . '        </div>'
       . '        <div class="col-md-2">'
       . '          <label for="ctt-tool-version" class="form-label">' . Html::escape((string) $this->t('Version')) . '</label>'
       . '          <input type="text" id="ctt-tool-version" class="form-control" placeholder="1.0.0">'
       . '        </div>'
       . '        <div class="col-md-2">'
-      . '          <label for="ctt-tool-language" class="form-label">' . Html::escape((string) $this->t('Language')) . '</label>'
-      . '          <input type="text" id="ctt-tool-language" class="form-control" placeholder="R, Python, SQL...">'
-      . '        </div>'
-      . '        <div class="col-md-2">'
-      . '          <label for="ctt-tool-release-date" class="form-label">' . Html::escape((string) $this->t('Release Date')) . '</label>'
-      . '          <input type="date" id="ctt-tool-release-date" class="form-control">'
-      . '        </div>'
-      . '        <div class="col-md-3">'
-      . '          <label for="ctt-tool-author" class="form-label">' . Html::escape((string) $this->t('Author')) . '</label>'
-      . '          <input type="text" id="ctt-tool-author" class="form-control" placeholder="name or email">'
-      . '        </div>'
-      . '        <div class="col-md-3">'
-      . '          <label for="ctt-tool-institution" class="form-label">' . Html::escape((string) $this->t('Institution')) . '</label>'
-      . '          <input type="text" id="ctt-tool-institution" class="form-control" placeholder="institution">'
+      . '          <label for="ctt-tool-language" class="form-label">' . Html::escape((string) $this->t('Language (inferred)')) . '</label>'
+      . '          <input type="text" id="ctt-tool-language" class="form-control" readonly placeholder="Derived from filename suffix">'
       . '        </div>'
       . '        <div class="col-md-6">'
-      . '          <label for="ctt-tool-process-uri" class="form-label">' . Html::escape((string) $this->t('Process URI')) . '</label>'
-      . '          <input type="url" id="ctt-tool-process-uri" class="form-control" value="' . Html::escape($initialProcessUri) . '" placeholder="http://example.org/process/..." required>'
+      . '          <label for="ctt-tool-process-name" class="form-label">' . Html::escape((string) $this->t('Process Name')) . '</label>'
+      . '          <input type="text" id="ctt-tool-process-name" class="form-control form-autocomplete" data-autocomplete-path="' . Html::escape($processAutocompleteEndpoint) . '" value="' . Html::escape($initialProcessDisplayValue) . '" placeholder="Type process name or paste URI" required autocomplete="off">'
+      . '          <small class="text-muted">' . Html::escape((string) $this->t('Use autocomplete label [URI] format or paste a full process URI.')) . '</small>'
       . '        </div>'
       . '        <div class="col-md-6">'
       . '          <label for="ctt-tool-owner-person-uri" class="form-label">' . Html::escape((string) $this->t('Owner Person URI (KGR)')) . '</label>'
-      . '          <input type="url" id="ctt-tool-owner-person-uri" class="form-control" placeholder="http://example.org/PER/...">'
-      . '        </div>'
-      . '        <div class="col-md-3">'
-      . '          <label for="ctt-tool-scenario-uri" class="form-label">' . Html::escape((string) $this->t('Scenario URI')) . '</label>'
-      . '          <input type="url" id="ctt-tool-scenario-uri" class="form-control" placeholder="http://example.org/scenario/...">'
-      . '        </div>'
-      . '        <div class="col-md-3">'
-      . '          <label for="ctt-tool-dataset-uri" class="form-label">' . Html::escape((string) $this->t('Dataset URI')) . '</label>'
-      . '          <input type="url" id="ctt-tool-dataset-uri" class="form-control" placeholder="http://example.org/dataset/...">'
-      . '        </div>'
-      . '        <div class="col-md-6">'
-      . '          <label for="ctt-tool-source-uri" class="form-label">' . Html::escape((string) $this->t('Source Repository URI')) . '</label>'
-      . '          <input type="url" id="ctt-tool-source-uri" class="form-control" placeholder="http://example.org/repository/tool">'
+      . '          <input type="url" id="ctt-tool-owner-person-uri" class="form-control" value="' . Html::escape($currentUserPersonUri) . '" placeholder="http://example.org/PER/...">'
       . '        </div>'
       . '        <div class="col-md-3">'
       . '          <label for="ctt-tool-artifact-filename" class="form-label">' . Html::escape((string) $this->t('Artifact Filename')) . '</label>'
       . '          <input type="text" id="ctt-tool-artifact-filename" class="form-control" placeholder="script.R">'
-      . '        </div>'
-      . '        <div class="col-md-3">'
-      . '          <label for="ctt-tool-artifact-uri" class="form-label">' . Html::escape((string) $this->t('Artifact URI')) . '</label>'
-      . '          <input type="url" id="ctt-tool-artifact-uri" class="form-control" placeholder="http://example.org/artifacts/script.R">'
-      . '        </div>'
-      . '        <div class="col-md-12">'
-      . '          <label for="ctt-tool-tags" class="form-label">' . Html::escape((string) $this->t('Tags (comma separated)')) . '</label>'
-      . '          <input type="text" id="ctt-tool-tags" class="form-control" placeholder="regression, validation">'
       . '        </div>'
       . '        <div class="col-md-12">'
       . '          <label for="ctt-tool-description" class="form-label">' . Html::escape((string) $this->t('Description')) . '</label>'
@@ -1565,7 +1699,7 @@ class CttEditorController extends ControllerBase {
       . '        <div class="col-12 d-flex gap-2">'
       . '          <button type="submit" class="btn btn-success btn-sm">' . Html::escape((string) $this->t('Save Tool')) . '</button>'
       . '          <button type="button" id="ctt-tool-reset" class="btn btn-outline-secondary btn-sm">' . Html::escape((string) $this->t('Reset Form')) . '</button>'
-      . '          <small class="text-muted align-self-center">' . Html::escape((string) $this->t('Only the tool owner can update metadata or remove a tool.')) . '</small>'
+      . '          <small class="text-muted align-self-center">' . Html::escape((string) $this->t('Owner and institution are automatically set from the current user profile.')) . '</small>'
       . '        </div>'
       . '      </form>'
       . '    </div>'
@@ -1582,18 +1716,26 @@ class CttEditorController extends ControllerBase {
       '#attached' => [
         'library' => [
           'ctt/ctt-tools-repository',
+          'core/drupal.autocomplete',
         ],
         'drupalSettings' => [
           'cttToolsRepository' => [
             'endpoint' => $endpoint,
             'processListEndpoint' => $processListEndpoint,
+            'processAutocompleteEndpoint' => $processAutocompleteEndpoint,
             'initialStudyUri' => $initialStudyUri,
             'initialProcessUri' => $initialProcessUri,
+            'initialProcessLabel' => $initialProcessLabel,
+            'initialProcessDisplayValue' => $initialProcessDisplayValue,
             'initialScenarioUri' => $initialScenarioUri,
             'mode' => $editorMode ? 'editor' : 'collection',
             'editorToolUri' => $editorToolUri,
             'collectionPageUrl' => $collectionPageUrl,
             'editorPageUrl' => $editorPageUrl,
+            'currentUserEmail' => $currentUserEmail,
+            'currentUserPersonUri' => $currentUserPersonUri,
+            'currentUserInstitutionUri' => $currentUserInstitutionUri,
+            'currentUserInstitutionLabel' => $currentUserInstitutionLabel,
           ],
         ],
       ],
@@ -1601,6 +1743,13 @@ class CttEditorController extends ControllerBase {
         'max-age' => 0,
       ],
     ];
+  }
+
+  /**
+   * Dynamic title for R analysis page.
+   */
+  public function rAnalysisTitle(): string {
+    return (string) $this->t('Scenario Search > Manage Scenario Elements > R Analysis Interface');
   }
 
   /**
@@ -1622,74 +1771,90 @@ class CttEditorController extends ControllerBase {
 
     $initialStudyUri = trim((string) \Drupal::request()->query->get('studyUri', ''));
     $initialProcessUri = trim((string) \Drupal::request()->query->get('processUri', ''));
+    $initialScenarioName = trim((string) \Drupal::request()->query->get('scenarioName', ''));
+    $initialProcessName = trim((string) \Drupal::request()->query->get('processName', ''));
+    $initialToolUri = trim((string) \Drupal::request()->query->get('toolUri', ''));
+
+    $initialStudyLabel = $initialScenarioName;
+    if ($initialStudyLabel === '' && $this->isUri($initialStudyUri)) {
+      $initialStudyLabel = $this->resolveLabelByUri($initialStudyUri);
+    }
+
+    $initialProcessLabel = $initialProcessName;
+    if ($initialProcessLabel === '' && $this->isUri($initialProcessUri)) {
+      $initialProcessLabel = $this->resolveLabelByUri($initialProcessUri);
+    }
+
+    $initialStudyDisplayValue = $initialStudyLabel !== '' ? $initialStudyLabel : (string) $this->t('Scenario');
+    $initialProcessDisplayValue = $initialProcessLabel !== '' ? $initialProcessLabel : (string) $this->t('Process');
+    $returnToRaw = trim((string) \Drupal::request()->query->get('returnTo', ''));
+    $returnTo = rawurldecode($returnToRaw);
+    if ($returnTo !== '' && !str_starts_with($returnTo, '/')) {
+      $returnTo = '';
+    }
+
+    if ($returnTo === '' && $this->isUri($initialStudyUri)) {
+      $returnTo = Url::fromRoute('std.manage_study_elements', [
+        'studyuri' => base64_encode($initialStudyUri),
+      ], [
+        'query' => [
+          'openPanel' => 'process-executions',
+        ],
+        'fragment' => 'process-executions',
+      ])->toString();
+    }
+
+    $backButtonMarkup = '';
+    if ($returnTo !== '') {
+      $backButtonMarkup = ''
+        . '<div class="mt-3 mb-0">'
+        . '  <a class="btn btn-outline-primary btn-sm" href="' . Html::escape($returnTo) . '">'
+        . Html::escape((string) $this->t('Back to Scenario Search > Manage Scenario Elements'))
+        . '  </a>'
+        . '</div>';
+    }
 
     $markup = ''
       . '<div id="ctt-r-analysis-page" class="ctt-r-analysis-page">'
-      . '  <p class="ctt-r-intro">' . Html::escape((string) $this->t('Run R analysis with real study/process context from PMSR.')) . '</p>'
+      . '  <p class="ctt-r-intro">' . Html::escape((string) $this->t('Run R analysis with real Scenario/process context from PMSR.')) . '</p>'
       . '  <div id="ctt-r-feedback" class="alert d-none" role="alert"></div>'
       . '  <section class="card mb-3">'
       . '    <div class="card-header"><strong>' . Html::escape((string) $this->t('Execution Context')) . '</strong></div>'
       . '    <div class="card-body">'
       . '      <form id="ctt-r-analysis-form" class="row g-2 align-items-end">'
       . '        <div class="col-md-6">'
-      . '          <label for="ctt-r-study-uri" class="form-label">' . Html::escape((string) $this->t('Study (search by name)')) . '</label>'
-      . '          <input type="text" id="ctt-r-study-uri" name="studyUri" class="form-control form-autocomplete" data-autocomplete-path="' . Html::escape($studyAutocompleteEndpoint) . '" required value="' . Html::escape($initialStudyUri) . '" placeholder="Type study name or paste URI" autocomplete="off">'
-      . '          <div id="ctt-r-study-uri-hint" class="ctt-r-inline-hint text-muted">' . Html::escape((string) $this->t('Use autocomplete label [URI] format or paste a full http(s) URI.')) . '</div>'
+      . '          <label for="ctt-r-study-name" class="form-label">' . Html::escape((string) $this->t('Scenario name')) . '</label>'
+      . '          <input type="text" id="ctt-r-study-name" class="form-control" readonly disabled value="' . Html::escape($initialStudyDisplayValue) . '">'
+      . '          <input type="hidden" id="ctt-r-study-uri" name="studyUri" value="' . Html::escape($initialStudyUri) . '">'
       . '          <div id="ctt-r-study-uri-error" class="ctt-r-inline-error d-none" role="alert" aria-live="polite"></div>'
       . '        </div>'
       . '        <div class="col-md-6">'
-      . '          <label for="ctt-r-process-uri" class="form-label">' . Html::escape((string) $this->t('Process (search by name)')) . '</label>'
-      . '          <input type="text" id="ctt-r-process-uri" name="processUri" class="form-control form-autocomplete" data-autocomplete-path="' . Html::escape($processAutocompleteEndpoint) . '" required value="' . Html::escape($initialProcessUri) . '" placeholder="Type process name or paste URI" autocomplete="off">'
-      . '          <div id="ctt-r-process-uri-hint" class="ctt-r-inline-hint text-muted">' . Html::escape((string) $this->t('Use autocomplete label [URI] format or paste a full http(s) URI.')) . '</div>'
+      . '          <label for="ctt-r-process-name" class="form-label">' . Html::escape((string) $this->t('Process name')) . '</label>'
+      . '          <input type="text" id="ctt-r-process-name" class="form-control" readonly disabled value="' . Html::escape($initialProcessDisplayValue) . '">'
+      . '          <input type="hidden" id="ctt-r-process-uri" name="processUri" value="' . Html::escape($initialProcessUri) . '">'
       . '          <div id="ctt-r-process-uri-error" class="ctt-r-inline-error d-none" role="alert" aria-live="polite"></div>'
       . '        </div>'
       . '        <div class="col-md-8">'
       . '          <label for="ctt-r-tool-uri" class="form-label">' . Html::escape((string) $this->t('R Tool (from real repository)')) . '</label>'
-      . '          <select id="ctt-r-tool-uri" class="form-select" required>'
+      . '          <select id="ctt-r-tool-uri" class="form-select" required disabled>'
       . '            <option value="">' . Html::escape((string) $this->t('Load context first to list R tools')) . '</option>'
       . '          </select>'
       . '        </div>'
       . '        <div class="col-md-4">'
-      . '          <label for="ctt-r-entrypoint" class="form-label">' . Html::escape((string) $this->t('Entrypoint override (optional)')) . '</label>'
-      . '          <input type="text" id="ctt-r-entrypoint" class="form-control" placeholder="main">'
+      . '          <label for="ctt-r-dataset-uri" class="form-label">' . Html::escape((string) $this->t('Scenario dataset input')) . '</label>'
+      . '          <select id="ctt-r-dataset-uri" class="form-select" required>'
+      . '            <option value="">' . Html::escape((string) $this->t('Select one dataset')) . '</option>'
+      . '          </select>'
       . '        </div>'
       . '        <div class="col-12">'
       . '          <label for="ctt-r-arguments-json" class="form-label">' . Html::escape((string) $this->t('Arguments (JSON object)')) . '</label>'
       . '          <textarea id="ctt-r-arguments-json" class="form-control" rows="5" placeholder="{&#10;  &quot;alpha&quot;: 0.05,&#10;  &quot;iterations&quot;: 1000&#10;}"></textarea>'
       . '        </div>'
-      . '        <div class="col-md-8">'
-      . '          <label for="ctt-r-argument-template" class="form-label">' . Html::escape((string) $this->t('Argument Template (clinical presets)')) . '</label>'
-      . '          <select id="ctt-r-argument-template" class="form-select">'
-      . '            <option value="">' . Html::escape((string) $this->t('Select a template')) . '</option>'
-      . '            <option value="aspiration-baseline">' . Html::escape((string) $this->t('Aspiration baseline check')) . '</option>'
-      . '            <option value="aspiration-high-risk">' . Html::escape((string) $this->t('Aspiration high-risk patient')) . '</option>'
-      . '            <option value="aspiration-followup">' . Html::escape((string) $this->t('Aspiration follow-up reassessment')) . '</option>'
-      . '          </select>'
-      . '        </div>'
-      . '        <div class="col-md-4 d-flex align-items-end ctt-r-template-actions">'
-      . '          <button type="button" id="ctt-r-apply-template" class="btn btn-outline-info btn-sm w-100">' . Html::escape((string) $this->t('Apply Template')) . '</button>'
-      . '        </div>'
-      . '        <div class="col-12">'
-      . '          <div class="form-check ctt-r-validate-check">'
-      . '            <input class="form-check-input" type="checkbox" id="ctt-r-validate-only" checked>'
-      . '            <label class="form-check-label" for="ctt-r-validate-only">' . Html::escape((string) $this->t('Validate only (skip upstream execution)')) . '</label>'
-      . '          </div>'
-      . '          <div class="ctt-r-persistence-note text-muted">' . Html::escape((string) $this->t('Form context is saved in this browser to speed up repeated tests.')) . '</div>'
-      . '        </div>'
       . '        <div class="col-12 d-flex flex-wrap gap-2">'
-      . '          <button type="button" id="ctt-r-load-context" class="btn btn-outline-primary btn-sm">' . Html::escape((string) $this->t('Load Real Context')) . '</button>'
-      . '          <button type="submit" id="ctt-r-run-analysis" class="btn btn-success btn-sm">' . Html::escape((string) $this->t('Run R Analysis')) . '</button>'
-      . '          <button type="button" id="ctt-r-copy-payload" class="btn btn-outline-secondary btn-sm">' . Html::escape((string) $this->t('Copy Request Payload')) . '</button>'
+      . '          <button type="submit" id="ctt-r-run-analysis" class="btn btn-success btn-sm" disabled>' . Html::escape((string) $this->t('Run R Analysis')) . '</button>'
       . '          <button type="button" id="ctt-r-download-log" class="btn btn-outline-secondary btn-sm" disabled>' . Html::escape((string) $this->t('Download Execution Log')) . '</button>'
-      . '          <button type="button" id="ctt-r-clear-saved-context" class="btn btn-outline-danger btn-sm">' . Html::escape((string) $this->t('Clear Saved Context')) . '</button>'
       . '        </div>'
       . '      </form>'
-      . '    </div>'
-      . '  </section>'
-      . '  <section class="card mb-3">'
-      . '    <div class="card-header"><strong>' . Html::escape((string) $this->t('Study Association Context (real state)')) . '</strong></div>'
-      . '    <div class="card-body">'
-      . '      <div id="ctt-r-context-summary" class="ctt-r-context-summary text-muted">' . Html::escape((string) $this->t('Load context to inspect datasets, variables, and medical images associated with this study.')) . '</div>'
       . '    </div>'
       . '  </section>'
       . '  <section class="card">'
@@ -1699,6 +1864,7 @@ class CttEditorController extends ControllerBase {
       . '      <pre id="ctt-r-response-output" class="ctt-r-response-output">' . Html::escape((string) $this->t('No execution yet.')) . '</pre>'
       . '    </div>'
       . '  </section>'
+      .      $backButtonMarkup
       . '</div>';
 
     return [
@@ -1713,11 +1879,17 @@ class CttEditorController extends ControllerBase {
             'toolsEndpoint' => $toolsEndpoint,
             'associationsEndpoint' => $associationsEndpoint,
             'statusEndpoint' => $statusEndpoint,
+            'stdJsonDataEndpoint' => $drupalBaseUrl . 'std/json-data',
             'executeEndpoint' => $executeEndpoint,
             'studyAutocompleteEndpoint' => $studyAutocompleteEndpoint,
             'processAutocompleteEndpoint' => $processAutocompleteEndpoint,
             'initialStudyUri' => $initialStudyUri,
+            'initialStudyDisplayValue' => $initialStudyDisplayValue,
             'initialProcessUri' => $initialProcessUri,
+            'initialProcessDisplayValue' => $initialProcessDisplayValue,
+            'initialScenarioName' => $initialScenarioName,
+            'initialProcessName' => $initialProcessName,
+            'initialToolUri' => $initialToolUri,
           ],
         ],
       ],
@@ -2025,6 +2197,7 @@ class CttEditorController extends ControllerBase {
     ];
 
     $drupal_settings['instrumentSelection'] = $this->buildInstrumentSelectionContext($study_uri);
+    $drupal_settings['instrumentSelection']['prefilterEndpoint'] = $drupal_base_url . 'workflow/api/instrument/prefilter';
 
     $scenarioLabel = $this->resolveLabelByUri($study_uri);
     $processLabel = $this->resolveLabelByUri($resolvedProcessUri);

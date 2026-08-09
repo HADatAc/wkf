@@ -1870,12 +1870,27 @@ class CttHascoClient {
    * List instruments with pagination.
    */
   public function listInstruments(int $page_size = 50, int $offset = 0): array {
+    $cache_key = 'ctt.instrument.list.' . max(1, (int) $page_size) . '.' . max(0, (int) $offset);
+    $cached = \Drupal::state()->get($cache_key, []);
+    if (is_array($cached)) {
+      $cached_at = (int) ($cached['cached_at'] ?? 0);
+      $cached_data = $cached['data'] ?? NULL;
+      if ($cached_at > 0 && (time() - $cached_at) <= 300 && is_array($cached_data)) {
+        return $cached_data;
+      }
+    }
+
     $endpoint = '/hascoapi/api/instrument/elements/' . $page_size . '/' . $offset;
     $primary_error = '';
     $primary_list = [];
+    $primary_timed_out = FALSE;
 
     try {
-      $response = $this->request('GET', $endpoint);
+      $response = $this->request('GET', $endpoint, [
+        // Keep assign-instrument UI responsive even when upstream is degraded.
+        'timeout' => 4,
+        'connect_timeout' => 1.5,
+      ]);
       $primary_list = $this->normalizeInstrumentListPayload($response);
 
       if (is_array($response) && (($response['isSuccessful'] ?? NULL) === FALSE)) {
@@ -1884,6 +1899,26 @@ class CttHascoClient {
     }
     catch (\Throwable $e) {
       $primary_error = trim($e->getMessage());
+      $lower_error = strtolower($primary_error);
+      $primary_timed_out = (str_contains($lower_error, 'timed out') || str_contains($lower_error, 'curl error 28'));
+    }
+
+    if (!empty($primary_list)) {
+      \Drupal::state()->set($cache_key, [
+        'cached_at' => time(),
+        'data' => $primary_list,
+      ]);
+    }
+
+    // Avoid compounding delays by skipping fallback on upstream timeout.
+    if ($primary_timed_out) {
+      if ($primary_error !== '') {
+        $this->logger->warning('Instrument list timeout on primary source; returning quickly without deep fallback: @message', [
+          '@message' => $primary_error,
+        ]);
+      }
+
+      return !empty($primary_list) ? $primary_list : [];
     }
 
     $fallback = $this->listInstrumentsViaRepConnector($page_size, $offset);
@@ -1903,6 +1938,11 @@ class CttHascoClient {
           ]);
         }
 
+        \Drupal::state()->set($cache_key, [
+          'cached_at' => time(),
+          'data' => $merged,
+        ]);
+
         return $merged;
       }
 
@@ -1914,7 +1954,18 @@ class CttHascoClient {
     }
 
     if (!empty($primary_list)) {
+      \Drupal::state()->set($cache_key, [
+        'cached_at' => time(),
+        'data' => $primary_list,
+      ]);
       return $primary_list;
+    }
+
+    if (!empty($fallback)) {
+      \Drupal::state()->set($cache_key, [
+        'cached_at' => time(),
+        'data' => $fallback,
+      ]);
     }
 
     return $fallback;
@@ -1926,6 +1977,47 @@ class CttHascoClient {
   public function getInstrumentComponents(string $instrument_uri): array {
     $endpoint = '/hascoapi/api/instrument/components/' . rawurlencode($instrument_uri);
     return $this->request('GET', $endpoint);
+  }
+
+  /**
+   * Get organization-scoped instrument prefilter payload from hascoapi.
+   */
+  public function getInstrumentPrefilter(?string $study_uri = NULL, ?string $process_uri = NULL, ?string $organization_uri = NULL, array $organization_scope_uris = []): array {
+    $query = [];
+
+    if (is_string($study_uri) && trim($study_uri) !== '') {
+      $query['studyUri'] = trim($study_uri);
+    }
+    if (is_string($process_uri) && trim($process_uri) !== '') {
+      $query['processUri'] = trim($process_uri);
+    }
+    if (is_string($organization_uri) && trim($organization_uri) !== '') {
+      $query['organizationUri'] = trim($organization_uri);
+    }
+
+    $scope_values = [];
+    foreach ($organization_scope_uris as $scope_uri) {
+      if (!is_scalar($scope_uri)) {
+        continue;
+      }
+      $candidate = trim((string) $scope_uri);
+      if ($candidate !== '') {
+        $scope_values[$candidate] = TRUE;
+      }
+    }
+    if (!empty($scope_values)) {
+      $query['organizationScopeUris'] = implode(',', array_keys($scope_values));
+    }
+
+    $endpoint = '/hascoapi/api/instrument/prefilter';
+    if (!empty($query)) {
+      $endpoint .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+    }
+
+    return $this->request('GET', $endpoint, [
+      'timeout' => 8,
+      'connect_timeout' => 2,
+    ]);
   }
 
   /**

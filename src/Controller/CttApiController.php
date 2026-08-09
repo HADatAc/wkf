@@ -269,6 +269,163 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * List local Scenario DA CSV files as selectable R input candidates.
+   *
+   * @return array<int, array<string, string>>
+   */
+  protected function listStudyDataAcquisitionFiles(string $studyUri, Request $request): array {
+    $normalizedStudyUri = trim($studyUri);
+    if (!$this->isUri($normalizedStudyUri) || !\Drupal::hasService('file_system')) {
+      return [];
+    }
+
+    $studyCode = $this->extractStudyCodeFromUri($normalizedStudyUri);
+    if ($studyCode === '') {
+      return [];
+    }
+
+    $fileSystem = \Drupal::service('file_system');
+    $realDir = $fileSystem->realpath('private://std/' . $studyCode . '/da');
+    if (!is_string($realDir) || $realDir === '' || !is_dir($realDir)) {
+      return [];
+    }
+
+    $csvFiles = glob(rtrim($realDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . '*.csv');
+    if (!is_array($csvFiles) || empty($csvFiles)) {
+      return [];
+    }
+
+    sort($csvFiles);
+
+    $entries = [];
+    foreach ($csvFiles as $csvPath) {
+      $filename = trim((string) basename((string) $csvPath));
+      if ($filename === '') {
+        continue;
+      }
+
+      $downloadUrl = $this->buildDatasetDownloadUrlForStudy($normalizedStudyUri, $filename, $request, []);
+      if (!$this->isUri($downloadUrl)) {
+        continue;
+      }
+
+      $entries[] = [
+        'uri' => $downloadUrl,
+        'label' => $filename,
+        'filename' => $filename,
+        'source' => 'study-da-file',
+      ];
+    }
+
+    return $entries;
+  }
+
+  /**
+   * Extract CSV filename candidate from URI/path/text.
+   */
+  protected function extractCsvFilenameCandidate(string $value): string {
+    $raw = trim($value);
+    if ($raw === '') {
+      return '';
+    }
+
+    $path = $raw;
+    if ($this->isUri($raw)) {
+      $parsedPath = (string) (parse_url($raw, PHP_URL_PATH) ?? '');
+      if ($parsedPath !== '') {
+        $path = $parsedPath;
+      }
+    }
+
+    $candidate = trim((string) basename($path));
+    if ($candidate === '') {
+      return '';
+    }
+
+    return str_ends_with(strtolower($candidate), '.csv') ? $candidate : '';
+  }
+
+  /**
+   * Resolve CSV filename from a dataset URI metadata record.
+   */
+  protected function resolveDatasetFilenameFromUri(string $datasetUri): string {
+    $normalizedDatasetUri = trim($datasetUri);
+    if (!$this->isUri($normalizedDatasetUri)) {
+      return '';
+    }
+
+    $fromUriPath = $this->extractCsvFilenameCandidate($normalizedDatasetUri);
+    if ($fromUriPath !== '') {
+      return $fromUriPath;
+    }
+
+    try {
+      $dataset = $this->hascoClient->getByUri($normalizedDatasetUri);
+      $candidates = [];
+
+      if (is_array($dataset)) {
+        foreach (['filename', 'fileName', 'hasFileName', 'name', 'label', 'title', 'downloadFilename', 'downloadFileName', 'hasDownloadFileName', 'hasDataFileName', 'sourceFileName'] as $field) {
+          if (isset($dataset[$field])) {
+            $candidates[] = (string) $dataset[$field];
+          }
+        }
+      }
+      elseif (is_object($dataset)) {
+        foreach (['filename', 'fileName', 'hasFileName', 'name', 'label', 'title', 'downloadFilename', 'downloadFileName', 'hasDownloadFileName', 'hasDataFileName', 'sourceFileName'] as $field) {
+          if (isset($dataset->{$field})) {
+            $candidates[] = (string) $dataset->{$field};
+          }
+        }
+      }
+
+      foreach ($candidates as $candidate) {
+        $filename = $this->extractCsvFilenameCandidate($candidate);
+        if ($filename !== '') {
+          return $filename;
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      return '';
+    }
+
+    return '';
+  }
+
+  /**
+   * Resolve execution dataset filename, prioritizing explicit dataset selection.
+   */
+  protected function resolveExecutionDatasetFilename(string $studyUri, string $selectedDatasetUri = '', string $selectedDatasetLabel = '', string $selectedDatasetFilename = ''): string {
+    $normalizedSelectedUri = trim($selectedDatasetUri);
+    $normalizedSelectedLabel = trim($selectedDatasetLabel);
+    $normalizedSelectedFilename = trim($selectedDatasetFilename);
+
+    if ($normalizedSelectedFilename !== '') {
+      $fromFilename = $this->extractCsvFilenameCandidate($normalizedSelectedFilename);
+      if ($fromFilename !== '') {
+        return $fromFilename;
+      }
+      return '';
+    }
+
+    if ($normalizedSelectedUri !== '' || $normalizedSelectedLabel !== '') {
+      $fromSelection = $this->resolveDatasetFilenameFromUri($normalizedSelectedUri);
+      if ($fromSelection !== '') {
+        return $fromSelection;
+      }
+
+      $fromLabel = $this->extractCsvFilenameCandidate($normalizedSelectedLabel);
+      if ($fromLabel !== '') {
+        return $fromLabel;
+      }
+
+      return '';
+    }
+
+    return $this->resolveStudyDatasetFilename($studyUri);
+  }
+
+  /**
    * Resolve public Drupal base URL suitable for HASCOAPI container downloads.
    */
   protected function resolvePublicBaseUrlForRAnalysis(Request $request, array $tool = []): string {
@@ -341,6 +498,84 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Resolve local filesystem path for a study dataset CSV.
+   */
+  protected function buildDatasetLocalPathForStudy(string $studyUri, string $datasetFilename): string {
+    if (!$this->isUri($studyUri) || trim($datasetFilename) === '' || !\Drupal::hasService('file_system')) {
+      return '';
+    }
+
+    $studyCode = $this->extractStudyCodeFromUri($studyUri);
+    if ($studyCode === '') {
+      return '';
+    }
+
+    $fileSystem = \Drupal::service('file_system');
+    $realDir = $fileSystem->realpath('private://std/' . $studyCode . '/da');
+    if (!is_string($realDir) || $realDir === '' || !is_dir($realDir)) {
+      return '';
+    }
+
+    $safeFilename = trim((string) basename($datasetFilename));
+    if ($safeFilename === '') {
+      return '';
+    }
+
+    $csvPath = rtrim($realDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $safeFilename;
+    if (!is_file($csvPath) || !is_readable($csvPath)) {
+      return '';
+    }
+
+    return $csvPath;
+  }
+
+  /**
+   * Read selected study dataset CSV and encode it for R engine input payload.
+   */
+  protected function buildEngineInputCsvBase64(string $studyUri, array $arguments): string {
+    $selectedDatasetUri = trim((string) ($arguments['selectedDatasetUri'] ?? ($arguments['datasetUri'] ?? '')));
+    $selectedDatasetLabel = trim((string) ($arguments['selectedDatasetLabel'] ?? ''));
+    $selectedDatasetFilename = trim((string) ($arguments['selectedDatasetFilename'] ?? ''));
+
+    $datasetFilename = $this->resolveExecutionDatasetFilename($studyUri, $selectedDatasetUri, $selectedDatasetLabel, $selectedDatasetFilename);
+    if ($datasetFilename === '') {
+      return '';
+    }
+
+    if (!$this->isUri($studyUri) || !\Drupal::hasService('file_system')) {
+      return '';
+    }
+
+    $studyCode = $this->extractStudyCodeFromUri($studyUri);
+    if ($studyCode === '') {
+      return '';
+    }
+
+    $safeFilename = trim((string) basename($datasetFilename));
+    if ($safeFilename === '') {
+      return '';
+    }
+
+    $fileSystem = \Drupal::service('file_system');
+    $realDir = $fileSystem->realpath('private://std/' . $studyCode . '/da');
+    if (!is_string($realDir) || $realDir === '' || !is_dir($realDir)) {
+      return '';
+    }
+
+    $csvPath = rtrim($realDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $safeFilename;
+    if (!is_file($csvPath) || !is_readable($csvPath)) {
+      return '';
+    }
+
+    $raw = file_get_contents($csvPath);
+    if ($raw === FALSE) {
+      return '';
+    }
+
+    return base64_encode($raw);
+  }
+
+  /**
    * Normalize rscriptArgs values and rewrite localhost URLs when needed.
    *
    * @param mixed $rawArgs
@@ -383,19 +618,38 @@ class CttApiController extends ControllerBase {
   protected function ensureExecuteRscriptArgs(array $arguments, string $studyUri, array $tool, Request $request, array &$issues): array {
     $normalizedArgs = $arguments;
 
+    $selectedDatasetUri = trim((string) ($normalizedArgs['selectedDatasetUri'] ?? ($normalizedArgs['datasetUri'] ?? '')));
+    $selectedDatasetLabel = trim((string) ($normalizedArgs['selectedDatasetLabel'] ?? ''));
+    $selectedDatasetFilename = trim((string) ($normalizedArgs['selectedDatasetFilename'] ?? ''));
+
     $currentRscriptArgs = $this->normalizeRscriptArgs($normalizedArgs['rscriptArgs'] ?? []);
     if (!empty($currentRscriptArgs)) {
       $normalizedArgs['rscriptArgs'] = $currentRscriptArgs;
       return $normalizedArgs;
     }
 
-    $datasetFilename = $this->resolveStudyDatasetFilename($studyUri);
+    $datasetFilename = $this->resolveExecutionDatasetFilename($studyUri, $selectedDatasetUri, $selectedDatasetLabel, $selectedDatasetFilename);
     if ($datasetFilename === '') {
+      if ($selectedDatasetUri !== '' || $selectedDatasetLabel !== '' || $selectedDatasetFilename !== '') {
+        $issues[] = $this->buildValidationIssue(
+          'arguments.selectedDatasetUri',
+          'selected_dataset_unresolved',
+          'Selected dataset could not be resolved to a CSV file for R execution.'
+        );
+        return $normalizedArgs;
+      }
+
       $issues[] = $this->buildValidationIssue(
         'arguments.rscriptArgs',
         'missing_rscript_args',
         'R execute requires arguments.rscriptArgs and no dataset CSV could be inferred automatically for this study.'
       );
+      return $normalizedArgs;
+    }
+
+    $datasetLocalPath = $this->buildDatasetLocalPathForStudy($studyUri, $datasetFilename);
+    if ($datasetLocalPath !== '') {
+      $normalizedArgs['rscriptArgs'] = [$datasetLocalPath];
       return $normalizedArgs;
     }
 
@@ -1981,6 +2235,364 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Remove one issue code from the issue list.
+   *
+   * @param array<int, array<string, mixed>> $issues
+   * @return array<int, array<string, mixed>>
+   */
+  protected function removeIssueByCode(array $issues, string $code): array {
+    if ($code === '') {
+      return $issues;
+    }
+
+    return array_values(array_filter($issues, function ($issue) use ($code) {
+      if (!is_array($issue)) {
+        return TRUE;
+      }
+      return trim((string) ($issue['code'] ?? '')) !== $code;
+    }));
+  }
+
+  /**
+   * Extract output file paths reported by upstream execution logs.
+   *
+   * @param mixed $upstream
+   * @return array<int, string>
+   */
+  protected function extractGeneratedOutputPathsFromUpstreamPayload($upstream): array {
+    if (!is_array($upstream)) {
+      return [];
+    }
+
+    $sources = [];
+
+    $logs = $upstream['body']['logs'] ?? [];
+    if (is_array($logs)) {
+      foreach ($logs as $entry) {
+        if (is_string($entry) && trim($entry) !== '') {
+          $sources[] = $entry;
+        }
+      }
+    }
+
+    $engineStdout = $upstream['body']['engine']['stdout'] ?? [];
+    if (is_array($engineStdout)) {
+      foreach ($engineStdout as $entry) {
+        if (is_string($entry) && trim($entry) !== '') {
+          $sources[] = $entry;
+        }
+      }
+    }
+
+    $engineStderr = $upstream['body']['engine']['stderr'] ?? [];
+    if (is_array($engineStderr)) {
+      foreach ($engineStderr as $entry) {
+        if (is_string($entry) && trim($entry) !== '') {
+          $sources[] = $entry;
+        }
+      }
+    }
+
+    $paths = [];
+    $seen = [];
+    foreach ($sources as $sourceText) {
+      if (!preg_match_all("#(/Users/Shared/drupal_private/std/[^\\s\"'<>]+)#", $sourceText, $matches) || empty($matches[1])) {
+        continue;
+      }
+
+      foreach ($matches[1] as $rawPath) {
+        $normalized = rtrim(trim((string) $rawPath), ".,;:)]}");
+        if ($normalized === '' || isset($seen[$normalized])) {
+          continue;
+        }
+
+        $seen[$normalized] = TRUE;
+        $paths[] = $normalized;
+      }
+    }
+
+    return $paths;
+  }
+
+  /**
+   * Discover recently generated study DA outputs by file modification time.
+   *
+   * @return array<int, string>
+   */
+  protected function discoverRecentStudyDaOutputPaths(string $studyUri, string $startedAtIso): array {
+    $studyCode = $this->extractStudyCodeFromUri($studyUri);
+    if ($studyCode === '' || !\Drupal::hasService('file_system')) {
+      return [];
+    }
+
+    $startTs = strtotime($startedAtIso);
+    if (!is_int($startTs) || $startTs <= 0) {
+      $startTs = time() - 120;
+    }
+
+    $windowStart = $startTs - 3;
+    $windowEnd = time() + 3;
+
+    $fileSystem = \Drupal::service('file_system');
+    $daDirReal = $fileSystem->realpath('private://std/' . $studyCode . '/da/');
+    if (!$daDirReal || !is_dir($daDirReal)) {
+      return [];
+    }
+
+    $entries = scandir($daDirReal) ?: [];
+    $paths = [];
+    foreach ($entries as $entry) {
+      $filename = trim((string) $entry);
+      if ($filename === '' || $filename === '.' || $filename === '..') {
+        continue;
+      }
+
+      $fullPath = rtrim($daDirReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $filename;
+      if (!is_file($fullPath)) {
+        continue;
+      }
+
+      $extension = strtolower((string) pathinfo($filename, PATHINFO_EXTENSION));
+      if (!in_array($extension, ['csv', 'xlsx', 'png'], TRUE)) {
+        continue;
+      }
+
+      $mtime = filemtime($fullPath);
+      if (!is_int($mtime) || $mtime < $windowStart || $mtime > $windowEnd) {
+        continue;
+      }
+
+      $paths[] = $fullPath;
+    }
+
+    return array_values(array_unique($paths));
+  }
+
+  /**
+   * Build compact timestamp tag for output filenames.
+   */
+  protected function buildRunTimestampTag(string $startedAtIso): string {
+    $ts = strtotime($startedAtIso);
+    if (!is_int($ts) || $ts <= 0) {
+      $ts = time();
+    }
+    return gmdate('Ymd-His', $ts);
+  }
+
+  /**
+   * Append timestamp suffix before extension.
+   */
+  protected function appendTimestampToFilename(string $filename, string $timestampTag): string {
+    $normalized = trim((string) basename($filename));
+    if ($normalized === '' || $timestampTag === '') {
+      return $normalized;
+    }
+
+    $ext = (string) pathinfo($normalized, PATHINFO_EXTENSION);
+    $base = (string) pathinfo($normalized, PATHINFO_FILENAME);
+    if ($ext === '') {
+      return $base . '-' . $timestampTag;
+    }
+
+    return $base . '-' . $timestampTag . '.' . $ext;
+  }
+
+  /**
+   * Move generated image outputs into Scenario Media panel and keep data files in DA.
+   *
+   * @param array<int, string> $paths
+   * @return array<string, mixed>
+   */
+  protected function routeGeneratedOutputFilesToScenarioContent(string $studyUri, array $paths, string $startedAtIso = ''): array {
+    $summary = [
+      'movedMedia' => [],
+      'keptDataFiles' => [],
+      'skipped' => [],
+      'errors' => [],
+    ];
+
+    $studyCode = $this->extractStudyCodeFromUri($studyUri);
+    if ($studyCode === '' || !\Drupal::hasService('file_system')) {
+      return $summary;
+    }
+
+    $fileSystem = \Drupal::service('file_system');
+    $mediaDirUri = 'private://std/' . $studyCode . '/media/';
+    if (!$fileSystem->prepareDirectory($mediaDirUri, \Drupal\Core\File\FileSystemInterface::CREATE_DIRECTORY)) {
+      $summary['errors'][] = 'Unable to prepare Scenario media directory.';
+      return $summary;
+    }
+
+    $timestampTag = $this->buildRunTimestampTag($startedAtIso);
+
+    foreach ($paths as $path) {
+      $filename = basename((string) $path);
+      if ($filename === '' || $filename === '.' || $filename === '..') {
+        continue;
+      }
+
+      $extension = strtolower((string) pathinfo($filename, PATHINFO_EXTENSION));
+      $sourceUri = 'private://std/' . $studyCode . '/da/' . $filename;
+      $sourceRealPath = $fileSystem->realpath($sourceUri);
+      if (!$sourceRealPath || !is_file($sourceRealPath)) {
+        $summary['skipped'][] = [
+          'filename' => $filename,
+          'reason' => 'source_not_found_in_da',
+        ];
+        continue;
+      }
+
+      if (in_array($extension, ['csv', 'xlsx'], TRUE)) {
+        $targetFilename = $this->appendTimestampToFilename($filename, $timestampTag);
+        $targetUri = 'private://std/' . $studyCode . '/da/' . $targetFilename;
+        $movedUri = $fileSystem->move($sourceUri, $targetUri, \Drupal\Core\File\FileSystemInterface::EXISTS_RENAME);
+        if (!$movedUri) {
+          $summary['errors'][] = 'Unable to timestamp generated data file: ' . $filename;
+          continue;
+        }
+
+        $summary['keptDataFiles'][] = basename((string) $movedUri);
+        continue;
+      }
+
+      if (!in_array($extension, ['png'], TRUE)) {
+        $summary['skipped'][] = [
+          'filename' => $filename,
+          'reason' => 'unsupported_extension',
+        ];
+        continue;
+      }
+
+      $targetFilename = $this->appendTimestampToFilename($filename, $timestampTag);
+      $targetUri = $mediaDirUri . $targetFilename;
+      $movedUri = $fileSystem->move($sourceUri, $targetUri, \Drupal\Core\File\FileSystemInterface::EXISTS_RENAME);
+      if (!$movedUri) {
+        $summary['errors'][] = 'Unable to move generated image to media: ' . $filename;
+        continue;
+      }
+
+      $summary['movedMedia'][] = [
+        'filename' => basename((string) $movedUri),
+        'from' => 'da',
+        'to' => 'media',
+      ];
+    }
+
+    $summary['keptDataFiles'] = array_values(array_unique($summary['keptDataFiles']));
+    return $summary;
+  }
+
+  /**
+   * Persist generated CSV files as Scenario dataset associations.
+   *
+   * @param array<int, string> $csvFilenames
+   * @return array<string, int>
+   */
+  protected function persistGeneratedDatasetAssociations(string $studyUri, array $csvFilenames, Request $request): array {
+    $associations = $this->loadStudyAssociations($studyUri);
+    $datasets = is_array($associations['datasets'] ?? NULL) ? $associations['datasets'] : [];
+    $seenUris = [];
+    $added = 0;
+
+    foreach ($datasets as $entry) {
+      if (!is_array($entry)) {
+        continue;
+      }
+      $uri = trim((string) ($entry['uri'] ?? ''));
+      if ($uri !== '') {
+        $seenUris[strtolower($uri)] = TRUE;
+      }
+    }
+
+    foreach ($csvFilenames as $filename) {
+      $normalizedFilename = trim((string) basename((string) $filename));
+      if ($normalizedFilename === '') {
+        continue;
+      }
+
+      $downloadUrl = $this->buildDatasetDownloadUrlForStudy($studyUri, $normalizedFilename, $request, []);
+      if (!$this->isUri($downloadUrl)) {
+        continue;
+      }
+
+      $key = strtolower($downloadUrl);
+      if (isset($seenUris[$key])) {
+        continue;
+      }
+
+      $seenUris[$key] = TRUE;
+      $datasets[] = [
+        'uri' => $downloadUrl,
+        'label' => $normalizedFilename,
+      ];
+      $added++;
+    }
+
+    $associations['datasets'] = $datasets;
+    $associations['counts']['datasets'] = count($datasets);
+    $this->saveStudyAssociations($studyUri, $associations);
+
+    return [
+      'addedDatasets' => $added,
+      'totalDatasets' => count($datasets),
+    ];
+  }
+
+  /**
+   * Build normalized created files list for UI consumption.
+   *
+   * @param array<string, mixed> $outputRouting
+   * @return array<int, array<string, string>>
+   */
+  protected function buildCreatedFilesFromOutputRouting(array $outputRouting): array {
+    $created = [];
+
+    $movedMedia = is_array($outputRouting['movedMedia'] ?? NULL)
+      ? $outputRouting['movedMedia']
+      : [];
+    foreach ($movedMedia as $entry) {
+      if (!is_array($entry)) {
+        continue;
+      }
+      $filename = trim((string) ($entry['filename'] ?? ''));
+      if ($filename === '') {
+        continue;
+      }
+
+      $created[] = [
+        'filename' => $filename,
+        'fileType' => 'png',
+        'contentsPanel' => 'Media',
+        'contentsPath' => 'Contents > Media',
+      ];
+    }
+
+    $keptDataFiles = is_array($outputRouting['keptDataFiles'] ?? NULL)
+      ? $outputRouting['keptDataFiles']
+      : [];
+    foreach ($keptDataFiles as $entry) {
+      $filename = trim((string) $entry);
+      if ($filename === '') {
+        continue;
+      }
+
+      $extension = strtolower((string) pathinfo($filename, PATHINFO_EXTENSION));
+      $created[] = [
+        'filename' => $filename,
+        'fileType' => $extension !== '' ? $extension : 'data',
+        'contentsPanel' => 'Data Files',
+        'contentsPath' => 'Contents > Unassociated Data Files',
+      ];
+    }
+
+    usort($created, function (array $a, array $b): int {
+      return strcmp((string) ($a['filename'] ?? ''), (string) ($b['filename'] ?? ''));
+    });
+
+    return $created;
+  }
+
+  /**
    * State key for the analytical tools repository catalog.
    */
   protected function getAnalyticalToolsCatalogKey(): string {
@@ -2549,6 +3161,125 @@ class CttApiController extends ControllerBase {
   }
 
   /**
+   * Resolve current user institution URI or label for tool ownership metadata.
+   */
+  protected function resolveCurrentUserInstitution(): string {
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return '';
+    }
+
+    $userEmail = $this->getCurrentUserEmail();
+    if ($userEmail === '') {
+      return '';
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $orgRaw = $api->listByManagerEmail('organization', $userEmail, 50, 0);
+      $orgParsed = $api->parseObjectResponse($orgRaw, 'listByManagerEmail');
+      $orgRows = [];
+
+      if (is_array($orgParsed)) {
+        $orgRows = $orgParsed;
+      }
+      elseif (is_object($orgParsed)) {
+        $orgRows = [$orgParsed];
+      }
+
+      foreach ($orgRows as $orgRow) {
+        if (is_object($orgRow)) {
+          $orgUri = trim((string) ($orgRow->uri ?? $orgRow->hasURI ?? ''));
+          if ($this->isUri($orgUri)) {
+            return $orgUri;
+          }
+
+          $orgLabel = trim((string) ($orgRow->label ?? $orgRow->name ?? ''));
+          if ($orgLabel !== '') {
+            return $orgLabel;
+          }
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      return '';
+    }
+
+    return '';
+  }
+
+  /**
+   * Resolve current user Person URI for ownership defaults.
+   */
+  protected function resolveCurrentUserPersonUri(): string {
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return '';
+    }
+
+    $userEmail = $this->getCurrentUserEmail();
+    if ($userEmail === '') {
+      return '';
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $peopleRaw = $api->listByManagerEmail('person', $userEmail, 50, 0);
+      $peopleParsed = $api->parseObjectResponse($peopleRaw, 'listByManagerEmail');
+      $peopleRows = [];
+
+      if (is_array($peopleParsed)) {
+        $peopleRows = $peopleParsed;
+      }
+      elseif (is_object($peopleParsed)) {
+        $peopleRows = [$peopleParsed];
+      }
+
+      foreach ($peopleRows as $personRow) {
+        if (!is_object($personRow)) {
+          continue;
+        }
+
+        $personUri = trim((string) ($personRow->uri ?? $personRow->hasURI ?? ''));
+        if ($this->isUri($personUri)) {
+          return $personUri;
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      return '';
+    }
+
+    return '';
+  }
+
+  /**
+   * Infer tool language from source filename suffix.
+   */
+  protected function inferToolLanguageFromFilename(string $filename): string {
+    $value = strtolower(trim($filename));
+    if ($value === '') {
+      return '';
+    }
+
+    if (str_ends_with($value, '.r')) {
+      return 'R';
+    }
+    if (str_ends_with($value, '.py')) {
+      return 'Python';
+    }
+    if (str_ends_with($value, '.sql')) {
+      return 'SQL';
+    }
+    if (str_ends_with($value, '.js')) {
+      return 'JavaScript';
+    }
+    if (str_ends_with($value, '.ts')) {
+      return 'TypeScript';
+    }
+
+    return '';
+  }
+
+  /**
    * Generate a deterministic HTTP URI for a new analytical tool entry.
    */
   protected function generateAnalyticalToolUri(string $name): string {
@@ -2585,12 +3316,31 @@ class CttApiController extends ControllerBase {
     $artifactUri = trim((string) ($payload['artifactUri'] ?? ($existing['artifactUri'] ?? '')));
     $author = trim((string) ($payload['author'] ?? ($existing['author'] ?? '')));
     $institution = trim((string) ($payload['institution'] ?? ($existing['institution'] ?? '')));
+    $sourceFilename = trim((string) ($payload['sourceFilename'] ?? ($existing['sourceFilename'] ?? '')));
+    $sourceCode = (string) ($payload['sourceCode'] ?? ($existing['sourceCode'] ?? ''));
+    $sourceCodeEncoding = trim((string) ($payload['sourceCodeEncoding'] ?? ($existing['sourceCodeEncoding'] ?? 'text/plain')));
     $scenarioUri = trim((string) ($payload['scenarioUri'] ?? ($existing['scenarioUri'] ?? '')));
     $datasetUri = trim((string) ($payload['datasetUri'] ?? ($existing['datasetUri'] ?? '')));
     $releaseDate = trim((string) ($payload['releaseDate'] ?? ($existing['releaseDate'] ?? '')));
     $lineageUri = trim((string) ($payload['lineageUri'] ?? ($existing['lineageUri'] ?? '')));
     $status = strtolower(trim((string) ($payload['status'] ?? ($existing['status'] ?? 'draft'))));
     $tags = $this->normalizeToolTags($payload['tags'] ?? ($existing['tags'] ?? []));
+
+    if ($sourceFilename !== '') {
+      $name = $sourceFilename;
+      if ($artifactFilename === '') {
+        $artifactFilename = $sourceFilename;
+      }
+
+      $inferredLanguage = $this->inferToolLanguageFromFilename($sourceFilename);
+      if ($inferredLanguage !== '') {
+        $language = $inferredLanguage;
+      }
+    }
+
+    if ($sourceCode !== '' && strlen($sourceCode) > 1024 * 1024) {
+      $issues[] = $this->buildValidationIssue('sourceCode', 'source_code_too_large', 'Source code file content exceeds 1 MB.');
+    }
 
     $executeRequested = filter_var(($payload['execute'] ?? $payload['runNow'] ?? FALSE), FILTER_VALIDATE_BOOLEAN);
     if ($executeRequested) {
@@ -2684,6 +3434,23 @@ class CttApiController extends ControllerBase {
       // Keep current display name as fallback.
     }
 
+    $isCreate = empty($existing);
+    if ($isCreate) {
+      $institutionFromUser = $this->resolveCurrentUserInstitution();
+      if ($institutionFromUser !== '') {
+        $institution = $institutionFromUser;
+      }
+
+      if ($ownerPersonUri === '') {
+        $ownerPersonUri = $this->resolveCurrentUserPersonUri();
+      }
+
+      $releaseDate = gmdate('Y-m-d');
+    }
+    elseif ($releaseDate === '') {
+      $releaseDate = trim((string) ($existing['releaseDate'] ?? ''));
+    }
+
     $tool = [
       'toolUri' => $toolUri,
       'processUri' => $processUri,
@@ -2702,6 +3469,10 @@ class CttApiController extends ControllerBase {
       'artifactUri' => $artifactUri,
       'author' => $author,
       'institution' => $institution,
+      'sourceFilename' => $sourceFilename,
+      'sourceCode' => $sourceCode,
+      'sourceCodeEncoding' => $sourceCodeEncoding,
+      'sourceCodeBytes' => strlen($sourceCode),
       'scenarioUri' => $scenarioUri,
       'datasetUri' => $datasetUri,
       'releaseDate' => $releaseDate,
@@ -2731,6 +3502,7 @@ class CttApiController extends ControllerBase {
     if ($path === '') {
       $path = '/hascoapi/api/r-analysis/execute';
     }
+
     if (!str_starts_with($path, '/')) {
       $path = '/' . ltrim($path, '/');
     }
@@ -3791,6 +4563,769 @@ class CttApiController extends ControllerBase {
   // ================================================================
 
   /**
+   * Normalize plain/encoded/base64 URI-like query values.
+   */
+  protected function decodeMaybeEncodedUri(string $value): ?string {
+    $candidate = trim($value);
+    if ($candidate === '') {
+      return NULL;
+    }
+
+    $decoded = base64_decode($candidate, TRUE);
+    if (is_string($decoded) && $decoded !== '' && $this->isUri($decoded)) {
+      return $decoded;
+    }
+
+    return rawurldecode($candidate);
+  }
+
+  /**
+   * Normalize URI into a stable comparison key.
+   */
+  protected function normalizeUriKey(string $uri): string {
+    $normalized = trim($uri);
+    if ($normalized === '') {
+      return '';
+    }
+    if (str_contains($normalized, '#/')) {
+      $normalized = str_replace('#/', '#', $normalized);
+    }
+    return strtolower(rtrim($normalized, '/'));
+  }
+
+  /**
+   * Extract URI string from mixed scalar/object payloads.
+   */
+  protected function extractUriFromValue(mixed $value): string {
+    if (is_string($value)) {
+      $candidate = trim($value);
+      return $this->isUri($candidate) ? $candidate : '';
+    }
+
+    if (is_object($value)) {
+      foreach (['uri', 'hasURI', 'typeUri', 'componentUri', 'instrumentUri'] as $key) {
+        if (isset($value->{$key}) && is_string($value->{$key})) {
+          $candidate = trim((string) $value->{$key});
+          if ($this->isUri($candidate)) {
+            return $candidate;
+          }
+        }
+      }
+    }
+
+    if (is_array($value)) {
+      foreach (['uri', 'hasURI', 'typeUri', 'componentUri', 'instrumentUri'] as $key) {
+        if (!empty($value[$key]) && is_string($value[$key])) {
+          $candidate = trim((string) $value[$key]);
+          if ($this->isUri($candidate)) {
+            return $candidate;
+          }
+        }
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Normalize list/object API responses into a plain object list.
+   *
+   * @return array<int, object>
+   */
+  protected function normalizeApiListPayload(mixed $payload): array {
+    if ($payload === NULL) {
+      return [];
+    }
+
+    if (is_object($payload)) {
+      if (isset($payload->elements) && is_array($payload->elements)) {
+        return array_values(array_filter($payload->elements, 'is_object'));
+      }
+
+      return [$payload];
+    }
+
+    if (!is_array($payload)) {
+      return [];
+    }
+
+    $list = [];
+    foreach ($payload as $item) {
+      if (is_object($item)) {
+        $list[] = $item;
+      }
+    }
+    return $list;
+  }
+
+  /**
+   * Resolve organization context from a Process-Based Study URI.
+   */
+  protected function resolveStudyOrganizationContext(?string $studyUri): array {
+    $context = [
+      'organizationUri' => '',
+      'organizationLabel' => '',
+    ];
+
+    $normalizedStudyUri = trim((string) $studyUri);
+    if ($normalizedStudyUri === '' || !\Drupal::hasService('rep.api_connector')) {
+      return $context;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $study = $api->parseObjectResponse($api->getUri($normalizedStudyUri), 'getUri');
+      if (!is_object($study)) {
+        return $context;
+      }
+
+      $institution = $study->institution ?? $study->hasInstitution ?? NULL;
+      if (is_object($institution)) {
+        $context['organizationUri'] = trim((string) ($institution->uri ?? $institution->hasURI ?? ''));
+        $context['organizationLabel'] = trim((string) ($institution->label ?? $institution->name ?? ''));
+      }
+      elseif (is_string($institution)) {
+        $institutionCandidate = trim($institution);
+        if ($this->isUri($institutionCandidate)) {
+          $context['organizationUri'] = $institutionCandidate;
+        }
+        else {
+          $context['organizationLabel'] = $institutionCandidate;
+        }
+      }
+
+      if ($context['organizationUri'] === '') {
+        foreach (['hasInstitutionUri', 'institutionUri'] as $key) {
+          if (!isset($study->{$key}) || !is_string($study->{$key})) {
+            continue;
+          }
+
+          $candidate = trim((string) $study->{$key});
+          if ($this->isUri($candidate)) {
+            $context['organizationUri'] = $candidate;
+            break;
+          }
+        }
+      }
+
+      if ($context['organizationLabel'] === '') {
+        $context['organizationLabel'] = trim((string) ($study->institutionName ?? ''));
+      }
+    }
+    catch (\Throwable $ignored) {
+      return $context;
+    }
+
+    return $context;
+  }
+
+  /**
+   * Resolve current user organization context with study fallback.
+   */
+  protected function resolveCurrentUserOrganizationContext(?string $studyUri = NULL): array {
+    $context = [
+      'organizationUri' => '',
+      'organizationLabel' => '',
+    ];
+
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return $this->resolveStudyOrganizationContext($studyUri);
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $userEmail = '';
+      try {
+        $user = \Drupal\user\Entity\User::load($this->currentUser()->id());
+        if ($user && is_string($user->getEmail())) {
+          $userEmail = trim((string) $user->getEmail());
+        }
+      }
+      catch (\Throwable $ignored) {
+        $userEmail = '';
+      }
+
+      if ($userEmail !== '') {
+        $orgRaw = $api->listByManagerEmail('organization', $userEmail, 50, 0);
+        $orgParsed = $api->parseObjectResponse($orgRaw, 'listByManagerEmail');
+        $organizations = $this->normalizeApiListPayload($orgParsed);
+
+        foreach ($organizations as $organization) {
+          if (!is_object($organization)) {
+            continue;
+          }
+
+          $orgUri = trim((string) ($organization->uri ?? $organization->hasURI ?? ''));
+          if (!$this->isUri($orgUri)) {
+            continue;
+          }
+
+          $context['organizationUri'] = $orgUri;
+          $context['organizationLabel'] = trim((string) ($organization->label ?? $organization->name ?? ''));
+          break;
+        }
+
+        if ($context['organizationUri'] === '') {
+          $peopleRaw = $api->listByManagerEmail('person', $userEmail, 50, 0);
+          $peopleParsed = $api->parseObjectResponse($peopleRaw, 'listByManagerEmail');
+          $people = $this->normalizeApiListPayload($peopleParsed);
+
+          foreach ($people as $person) {
+            if (!is_object($person)) {
+              continue;
+            }
+
+            $affiliationUri = '';
+            if (isset($person->hasAffiliation)) {
+              $affiliationUri = $this->extractUriFromValue($person->hasAffiliation);
+            }
+            if ($affiliationUri === '' && isset($person->hasAffiliationUri) && is_string($person->hasAffiliationUri)) {
+              $affiliationUri = trim((string) $person->hasAffiliationUri);
+            }
+
+            if (!$this->isUri($affiliationUri)) {
+              continue;
+            }
+
+            $context['organizationUri'] = $affiliationUri;
+            $context['organizationLabel'] = trim((string) ($person->hasAffiliation->label ?? ''));
+            break;
+          }
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      $context = [
+        'organizationUri' => '',
+        'organizationLabel' => '',
+      ];
+    }
+
+    if ($context['organizationUri'] === '') {
+      return $this->resolveStudyOrganizationContext($studyUri);
+    }
+
+    return $context;
+  }
+
+  /**
+   * Resolve direct/indirect organization scope for filtering.
+   *
+   * @return array<int, string>
+   */
+  protected function resolveOrganizationScopeUris(string $organizationUri): array {
+    $scope = [];
+    $normalizedRoot = trim($organizationUri);
+    if (!$this->isUri($normalizedRoot) || !\Drupal::hasService('rep.api_connector')) {
+      return [];
+    }
+
+    $scope[$normalizedRoot] = TRUE;
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $org = $api->parseObjectResponse($api->getUri($normalizedRoot), 'getUri');
+
+      if (is_object($org)) {
+        foreach (['parentOrganizationUri', 'hasParentOrganizationUri', 'parentOrganization', 'hasParentOrganization', 'isPartOf', 'partOf'] as $key) {
+          if (!isset($org->{$key})) {
+            continue;
+          }
+
+          $parentUri = $this->extractUriFromValue($org->{$key});
+          if ($parentUri !== '' && $this->isUri($parentUri)) {
+            $scope[$parentUri] = TRUE;
+          }
+        }
+      }
+
+      if (method_exists($api, 'sparqlQuery')) {
+        $sparqlParents = 'SELECT DISTINCT ?parent WHERE {'
+          . ' <' . $normalizedRoot . '> <https://schema.org/isPartOf> ?parent .'
+          . '}';
+
+        $rawParents = $api->sparqlQuery($sparqlParents);
+        $parentsDecoded = json_decode((string) $rawParents, TRUE);
+        $parentsBindings = $parentsDecoded['results']['bindings'] ?? [];
+        if (is_array($parentsBindings)) {
+          foreach ($parentsBindings as $binding) {
+            if (!is_array($binding)) {
+              continue;
+            }
+            $parentUri = trim((string) ($binding['parent']['value'] ?? ''));
+            if ($this->isUri($parentUri)) {
+              $scope[$parentUri] = TRUE;
+            }
+          }
+        }
+
+        $sparqlChildren = 'SELECT DISTINCT ?child WHERE {'
+          . ' ?child <https://schema.org/isPartOf> <' . $normalizedRoot . '> .'
+          . '}';
+
+        $rawChildren = $api->sparqlQuery($sparqlChildren);
+        $childrenDecoded = json_decode((string) $rawChildren, TRUE);
+        $childrenBindings = $childrenDecoded['results']['bindings'] ?? [];
+        if (is_array($childrenBindings)) {
+          foreach ($childrenBindings as $binding) {
+            if (!is_array($binding)) {
+              continue;
+            }
+            $childUri = trim((string) ($binding['child']['value'] ?? ''));
+            if ($this->isUri($childUri)) {
+              $scope[$childUri] = TRUE;
+            }
+          }
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      // Keep best-effort scope.
+    }
+
+    return array_values(array_keys($scope));
+  }
+
+  /**
+   * Resolve platform instances belonging to organization scope.
+   *
+   * @return array<string, array<string, string>>
+   */
+  protected function resolveOrganizationPlatformInstances(array $organizationScopeUris): array {
+    $options = [];
+    if (empty($organizationScopeUris) || !\Drupal::hasService('rep.api_connector')) {
+      return $options;
+    }
+
+    $scopeKeys = [];
+    foreach ($organizationScopeUris as $candidateUri) {
+      $candidateKey = $this->normalizeUriKey((string) $candidateUri);
+      if ($candidateKey !== '') {
+        $scopeKeys[$candidateKey] = TRUE;
+      }
+    }
+    if (empty($scopeKeys)) {
+      return $options;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $pageSize = 100;
+      $maxPages = 8;
+
+      for ($page = 0; $page < $maxPages; $page++) {
+        $offset = $page * $pageSize;
+        $raw = $api->listByKeyword('platforminstance', '_', $pageSize, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $chunk = $this->normalizeApiListPayload($parsed);
+        if (empty($chunk)) {
+          break;
+        }
+
+        foreach ($chunk as $platformInstance) {
+          if (!is_object($platformInstance)) {
+            continue;
+          }
+
+          $platformUri = trim((string) ($platformInstance->uri ?? ''));
+          if (!$this->isUri($platformUri)) {
+            continue;
+          }
+
+          $partOfUri = '';
+          if (isset($platformInstance->partOf)) {
+            $partOfUri = $this->extractUriFromValue($platformInstance->partOf);
+          }
+          if ($partOfUri === '' && isset($platformInstance->partOfUri) && is_string($platformInstance->partOfUri)) {
+            $partOfUri = trim((string) $platformInstance->partOfUri);
+          }
+
+          $partOfKey = $this->normalizeUriKey($partOfUri);
+          if ($partOfKey === '' || !isset($scopeKeys[$partOfKey])) {
+            continue;
+          }
+
+          $label = trim((string) ($platformInstance->label ?? $platformInstance->name ?? $platformUri));
+          $options[$platformUri] = [
+            'label' => $label !== '' ? $label : $platformUri,
+            'organizationUri' => $partOfUri,
+          ];
+        }
+
+        if (count($chunk) < $pageSize) {
+          break;
+        }
+      }
+    }
+    catch (\Throwable $ignored) {
+      return $options;
+    }
+
+    return $options;
+  }
+
+  /**
+   * Normalize component payload shape into compact list for frontend modal.
+   *
+   * @return array<int, array<string, mixed>>
+   */
+  protected function normalizeInstrumentComponentsPayload(mixed $payload): array {
+    $source = $payload;
+    if (is_array($payload) && array_key_exists('body', $payload)) {
+      $source = $payload['body'];
+    }
+
+    $rows = [];
+    if (is_object($source)) {
+      if (isset($source->elements) && is_array($source->elements)) {
+        $rows = $source->elements;
+      }
+      else {
+        $rows = [$source];
+      }
+    }
+    elseif (is_array($source)) {
+      if (isset($source['elements']) && is_array($source['elements'])) {
+        $rows = $source['elements'];
+      }
+      else {
+        $rows = $source;
+      }
+    }
+
+    $result = [];
+    $seen = [];
+    foreach ($rows as $row) {
+      if (is_object($row)) {
+        $row = (array) $row;
+      }
+      if (!is_array($row)) {
+        continue;
+      }
+
+      $componentUri = '';
+      foreach (['componentUri', 'hasComponent', 'uri', 'hasURI'] as $key) {
+        if (empty($row[$key])) {
+          continue;
+        }
+        $componentUri = $this->extractUriFromValue($row[$key]);
+        if ($componentUri !== '') {
+          break;
+        }
+      }
+      if (!$this->isUri($componentUri)) {
+        continue;
+      }
+
+      $componentKey = $this->normalizeUriKey($componentUri);
+      if ($componentKey === '' || isset($seen[$componentKey])) {
+        continue;
+      }
+      $seen[$componentKey] = TRUE;
+
+      $label = trim((string) ($row['label'] ?? $row['name'] ?? $row['title'] ?? $componentUri));
+      $status = trim((string) ($row['hasStatus'] ?? $row['status'] ?? ''));
+
+      $result[] = [
+        'uri' => $componentUri,
+        'hasURI' => $componentUri,
+        'label' => $label !== '' ? $label : $componentUri,
+        'hasStatus' => $status,
+      ];
+    }
+
+    return $result;
+  }
+
+  /**
+   * Build organization-scoped instrument payload with associated components.
+   */
+  protected function buildOrganizationScopedInstrumentsPayload(?string $studyUri, ?string $processUri): array {
+    $context = $this->resolveCurrentUserOrganizationContext($studyUri);
+    $organizationUri = trim((string) ($context['organizationUri'] ?? ''));
+    $organizationLabel = trim((string) ($context['organizationLabel'] ?? ''));
+
+    $cacheKey = 'ctt.instrument.prefilter.v1.' . sha1(json_encode([
+      'studyUri' => (string) $studyUri,
+      'processUri' => (string) $processUri,
+      'organizationUri' => $organizationUri,
+      'user' => (string) $this->currentUser()->id(),
+    ]));
+
+    $cached = \Drupal::state()->get($cacheKey, []);
+    if (is_array($cached)) {
+      $cachedAt = (int) ($cached['cached_at'] ?? 0);
+      $cachedData = $cached['data'] ?? NULL;
+      if ($cachedAt > 0 && (time() - $cachedAt) <= 300 && is_array($cachedData)) {
+        return $cachedData;
+      }
+    }
+
+    $payload = [
+      'organizationUri' => $organizationUri,
+      'organizationLabel' => $organizationLabel,
+      'studyUri' => (string) $studyUri,
+      'processUri' => (string) $processUri,
+      'instruments' => [],
+    ];
+
+    if (!$this->isUri($organizationUri) || !\Drupal::hasService('rep.api_connector')) {
+      return $payload;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $scopeUris = $this->resolveOrganizationScopeUris($organizationUri);
+      $platformDetails = $this->resolveOrganizationPlatformInstances($scopeUris);
+      if (empty($platformDetails)) {
+        return $payload;
+      }
+
+      $platformKeys = [];
+      foreach (array_keys($platformDetails) as $platformUri) {
+        $key = $this->normalizeUriKey((string) $platformUri);
+        if ($key !== '') {
+          $platformKeys[$key] = $platformUri;
+        }
+      }
+
+      $deadline = microtime(TRUE) + 8.0;
+      $pageSize = 100;
+      $maxPages = 8;
+      $maxInstanceLookups = 180;
+      $instanceLookups = 0;
+      $instrumentInstanceCache = [];
+      $instrumentRows = [];
+
+      for ($page = 0; $page < $maxPages; $page++) {
+        if (microtime(TRUE) >= $deadline) {
+          break;
+        }
+
+        $offset = $page * $pageSize;
+        $raw = $api->listByKeyword('deployment', '_', $pageSize, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $chunk = $this->normalizeApiListPayload($parsed);
+        if (empty($chunk)) {
+          break;
+        }
+
+        foreach ($chunk as $deployment) {
+          if (microtime(TRUE) >= $deadline) {
+            break 2;
+          }
+          if (!is_object($deployment)) {
+            continue;
+          }
+
+          $platformUri = '';
+          if (isset($deployment->platformInstance)) {
+            $platformUri = $this->extractUriFromValue($deployment->platformInstance);
+          }
+          if ($platformUri === '' && isset($deployment->platformInstanceUri) && is_string($deployment->platformInstanceUri)) {
+            $platformUri = trim((string) $deployment->platformInstanceUri);
+          }
+          $platformKey = $this->normalizeUriKey($platformUri);
+          if ($platformKey === '' || !isset($platformKeys[$platformKey])) {
+            continue;
+          }
+
+          $instrumentInstanceUri = '';
+          if (isset($deployment->instrumentInstance)) {
+            $instrumentInstanceUri = $this->extractUriFromValue($deployment->instrumentInstance);
+          }
+          if ($instrumentInstanceUri === '' && isset($deployment->instrumentInstanceUri) && is_string($deployment->instrumentInstanceUri)) {
+            $instrumentInstanceUri = trim((string) $deployment->instrumentInstanceUri);
+          }
+          if (!$this->isUri($instrumentInstanceUri)) {
+            continue;
+          }
+
+          if (!array_key_exists($instrumentInstanceUri, $instrumentInstanceCache)) {
+            if ($instanceLookups >= $maxInstanceLookups) {
+              break 2;
+            }
+
+            $instanceLookups++;
+            $instrumentUri = '';
+            $instrumentLabel = '';
+            $instrumentStatus = '';
+
+            try {
+              $instrumentInstance = $api->parseObjectResponse($api->getUri($instrumentInstanceUri), 'getUri');
+              if (is_object($instrumentInstance)) {
+                if (isset($instrumentInstance->typeUri) && is_string($instrumentInstance->typeUri)) {
+                  $instrumentUri = trim((string) $instrumentInstance->typeUri);
+                }
+                if (!$this->isUri($instrumentUri) && isset($instrumentInstance->type)) {
+                  $instrumentUri = $this->extractUriFromValue($instrumentInstance->type);
+                }
+                if (!$this->isUri($instrumentUri) && isset($instrumentInstance->instrument)) {
+                  $instrumentUri = $this->extractUriFromValue($instrumentInstance->instrument);
+                }
+
+                if (isset($instrumentInstance->type) && is_object($instrumentInstance->type)) {
+                  $instrumentLabel = trim((string) ($instrumentInstance->type->label ?? $instrumentInstance->type->name ?? ''));
+                  $instrumentStatus = trim((string) ($instrumentInstance->type->hasStatus ?? ''));
+                }
+              }
+            }
+            catch (\Throwable $ignored) {
+              $instrumentUri = '';
+            }
+
+            $instrumentInstanceCache[$instrumentInstanceUri] = [
+              'instrumentUri' => $this->isUri($instrumentUri) ? $instrumentUri : '',
+              'label' => $instrumentLabel,
+              'status' => $instrumentStatus,
+            ];
+          }
+
+          $resolved = $instrumentInstanceCache[$instrumentInstanceUri] ?? [];
+          $instrumentUri = trim((string) ($resolved['instrumentUri'] ?? ''));
+          if (!$this->isUri($instrumentUri)) {
+            continue;
+          }
+
+          if (!isset($instrumentRows[$instrumentUri])) {
+            $instrumentRows[$instrumentUri] = [
+              'uri' => $instrumentUri,
+              'hasURI' => $instrumentUri,
+              'label' => trim((string) ($resolved['label'] ?? '')),
+              'hasStatus' => trim((string) ($resolved['status'] ?? '')),
+              'instanceUris' => [],
+              'platforms' => [],
+              'components' => [],
+            ];
+          }
+
+          $instrumentRows[$instrumentUri]['instanceUris'][$instrumentInstanceUri] = $instrumentInstanceUri;
+          $instrumentRows[$instrumentUri]['platforms'][$platformUri] = [
+            'uri' => $platformUri,
+            'label' => (string) ($platformDetails[$platformUri]['label'] ?? $platformUri),
+          ];
+        }
+
+        if (count($chunk) < $pageSize) {
+          break;
+        }
+      }
+
+      $componentDeadline = microtime(TRUE) + 7.0;
+      $maxComponentLookups = 60;
+      $componentLookups = 0;
+
+      foreach ($instrumentRows as $instrumentUri => &$row) {
+        if (microtime(TRUE) >= $componentDeadline) {
+          break;
+        }
+        if ($componentLookups >= $maxComponentLookups) {
+          break;
+        }
+
+        $componentLookups++;
+        try {
+          $componentsRaw = $this->hascoClient->getInstrumentComponents($instrumentUri);
+          $row['components'] = $this->normalizeInstrumentComponentsPayload($componentsRaw);
+        }
+        catch (\Throwable $ignored) {
+          $row['components'] = [];
+        }
+
+        if (trim((string) $row['label']) === '') {
+          $row['label'] = $instrumentUri;
+        }
+
+        $row['instanceUris'] = array_values($row['instanceUris']);
+        $row['platforms'] = array_values($row['platforms']);
+      }
+      unset($row);
+
+      $payload['instruments'] = array_values($instrumentRows);
+
+      \Drupal::state()->set($cacheKey, [
+        'cached_at' => time(),
+        'data' => $payload,
+      ]);
+    }
+    catch (\Throwable $e) {
+      $this->getLogger('ctt')->warning('Instrument prefilter build failed: @message', [
+        '@message' => $e->getMessage(),
+      ]);
+    }
+
+    return $payload;
+  }
+
+  /**
+   * GET /workflow/api/instrument/prefilter
+   * Returns organization-scoped instruments with associated components.
+   */
+  public function listOrganizationScopedInstruments(Request $request) {
+    try {
+      $studyRaw = (string) $request->query->get('studyUri', '');
+      $processRaw = (string) $request->query->get('processUri', '');
+
+      $studyUri = $studyRaw !== '' ? $this->decodeMaybeEncodedUri($studyRaw) : NULL;
+      $processUri = $processRaw !== '' ? $this->decodeMaybeEncodedUri($processRaw) : NULL;
+
+      $organizationUri = trim((string) $request->query->get('organizationUri', ''));
+      if (!$this->isUri($organizationUri)) {
+        $context = $this->resolveCurrentUserOrganizationContext($studyUri);
+        $organizationUri = trim((string) ($context['organizationUri'] ?? ''));
+      }
+
+      $scopeUris = [];
+      $rawScopeUris = $request->query->all('organizationScopeUris');
+      if (is_array($rawScopeUris)) {
+        foreach ($rawScopeUris as $candidate) {
+          if (!is_scalar($candidate)) {
+            continue;
+          }
+          $value = trim((string) $candidate);
+          if ($this->isUri($value)) {
+            $scopeUris[$value] = TRUE;
+          }
+        }
+      }
+
+      $scopeCsv = trim((string) $request->query->get('organizationScopeUris', ''));
+      if ($scopeCsv !== '') {
+        foreach (explode(',', $scopeCsv) as $candidate) {
+          $value = trim((string) $candidate);
+          if ($this->isUri($value)) {
+            $scopeUris[$value] = TRUE;
+          }
+        }
+      }
+
+      if (empty($scopeUris) && $this->isUri($organizationUri)) {
+        foreach ($this->resolveOrganizationScopeUris($organizationUri) as $scopeUri) {
+          $value = trim((string) $scopeUri);
+          if ($this->isUri($value)) {
+            $scopeUris[$value] = TRUE;
+          }
+        }
+      }
+
+      $result = $this->hascoClient->getInstrumentPrefilter(
+        $studyUri,
+        $processUri,
+        $organizationUri,
+        array_values(array_keys($scopeUris))
+      );
+
+      return new JsonResponse($result);
+    }
+    catch (\Throwable $e) {
+      return new JsonResponse([
+        'ok' => FALSE,
+        'error' => $e->getMessage(),
+      ], 500);
+    }
+  }
+
+  /**
    * GET /workflow/api/instrument/list
    */
   public function listInstruments(Request $request) {
@@ -4207,6 +5742,21 @@ class CttApiController extends ControllerBase {
       $arguments = $this->ensureExecuteRscriptArgs($arguments, $studyUri, $tool, $request, $issues);
     }
 
+    $endpointPath = $this->getRAnalysisEndpointPath();
+    $isEngineRunEndpoint = preg_match('#/hascoapi/api/r-analysis/engine/run$#', $endpointPath) === 1;
+
+    $engineInputCsvBase64 = '';
+    if (!$validateOnly && $isEngineRunEndpoint) {
+      $engineInputCsvBase64 = $this->buildEngineInputCsvBase64($studyUri, $arguments);
+      if ($engineInputCsvBase64 === '') {
+        $issues[] = $this->buildValidationIssue(
+          'arguments.selectedDatasetUri',
+          'engine_input_dataset_unavailable',
+          'Unable to load selected Scenario dataset CSV for R engine execution.'
+        );
+      }
+    }
+
     $errorCount = 0;
     foreach ($issues as $issue) {
       if (($issue['severity'] ?? 'error') === 'error') {
@@ -4231,6 +5781,18 @@ class CttApiController extends ControllerBase {
       $resolvedEntrypoint = trim((string) ($tool['entrypoint'] ?? ''));
     }
 
+    if ($resolvedEntrypoint === '') {
+      $resolvedEntrypoint = trim((string) ($tool['sourceFilename'] ?? ''));
+    }
+
+    if ($resolvedEntrypoint === '') {
+      $resolvedEntrypoint = trim((string) ($tool['artifactFilename'] ?? ''));
+    }
+
+    if ($resolvedEntrypoint === '') {
+      $resolvedEntrypoint = 'inline.R';
+    }
+
     $requestPayload = [
       'studyUri' => $studyUri,
       'processUri' => $processUri,
@@ -4241,6 +5803,9 @@ class CttApiController extends ControllerBase {
         'language' => (string) ($tool['language'] ?? ''),
         'artifactUri' => $this->normalizeContainerReachableUri((string) ($tool['artifactUri'] ?? '')),
         'artifactFilename' => (string) ($tool['artifactFilename'] ?? ''),
+        'sourceFilename' => (string) ($tool['sourceFilename'] ?? ''),
+        'sourceCodeEncoding' => (string) ($tool['sourceCodeEncoding'] ?? 'text/plain'),
+        'inlineCode' => (string) ($tool['sourceCode'] ?? ''),
         'sourceRepositoryUri' => (string) ($tool['sourceRepositoryUri'] ?? ''),
         'entrypoint' => $resolvedEntrypoint,
       ],
@@ -4253,8 +5818,11 @@ class CttApiController extends ControllerBase {
       ],
     ];
 
+    if ($isEngineRunEndpoint && $engineInputCsvBase64 !== '') {
+      $requestPayload['inputCsvBase64'] = $engineInputCsvBase64;
+    }
+
     $timeoutSeconds = $this->getRAnalysisTimeoutSeconds();
-    $endpointPath = $this->getRAnalysisEndpointPath();
 
     if ($validateOnly) {
       return new JsonResponse([
@@ -4301,6 +5869,20 @@ class CttApiController extends ControllerBase {
         'connect_timeout' => min(10, $timeoutSeconds),
       ]);
 
+      $outputPaths = $this->extractGeneratedOutputPathsFromUpstreamPayload($upstream);
+      $recentPaths = $this->discoverRecentStudyDaOutputPaths($studyUri, $startedAt);
+      $outputPaths = array_values(array_unique(array_merge($outputPaths, $recentPaths)));
+      $outputRouting = $this->routeGeneratedOutputFilesToScenarioContent($studyUri, $outputPaths, $startedAt);
+      $associationUpdate = $this->persistGeneratedDatasetAssociations($studyUri, $outputRouting['keptDataFiles'] ?? [], $request);
+      $createdFiles = $this->buildCreatedFilesFromOutputRouting($outputRouting);
+      $effectiveAssociations = $this->loadStudyAssociations($studyUri);
+      $effectiveAssociationCount = (int) ($effectiveAssociations['counts']['datasets'] ?? 0)
+        + (int) ($effectiveAssociations['counts']['variables'] ?? 0)
+        + (int) ($effectiveAssociations['counts']['images'] ?? 0);
+      if ($effectiveAssociationCount > 0) {
+        $issues = $this->removeIssueByCode($issues, 'no_study_associations');
+      }
+
       $history = $this->loadRAnalysisRunHistory($studyUri);
       $historyIndex = $this->findRunHistoryIndex($history, $runId, $processUri, $toolUri);
       if ($historyIndex >= 0) {
@@ -4334,6 +5916,13 @@ class CttApiController extends ControllerBase {
           'backendEndpoint' => $endpointPath,
           'timeoutSeconds' => $timeoutSeconds,
         ],
+        'createdFiles' => $createdFiles,
+        'contentsInstructions' => [
+          'media' => 'Generated PNG charts are listed under Contents > Media.',
+          'dataFiles' => 'Generated CSV statistics are listed under Contents > Unassociated Data Files.',
+        ],
+        'outputRouting' => $outputRouting,
+        'associationsUpdate' => $associationUpdate,
         'upstream' => $upstream,
       ]);
     }
@@ -4769,6 +6358,11 @@ class CttApiController extends ControllerBase {
           'derivedDatasetCount' => count($derivedDatasetUris),
         ];
 
+        $toolProcessUri = trim((string) ($tool['processUri'] ?? ''));
+        $tool['processLabel'] = $toolProcessUri !== ''
+          ? $this->resolveProcessLabelFromUri($toolProcessUri)
+          : '';
+
         $filtered[] = $tool;
       }
 
@@ -4922,6 +6516,10 @@ class CttApiController extends ControllerBase {
     $this->saveAnalyticalToolsCatalog($catalog);
 
     $tool = $catalog[$toolUri];
+    $toolProcessUri = trim((string) ($tool['processUri'] ?? ''));
+    $tool['processLabel'] = $toolProcessUri !== ''
+      ? $this->resolveProcessLabelFromUri($toolProcessUri)
+      : '';
 
     return new JsonResponse([
       'isValid' => TRUE,
@@ -4981,6 +6579,8 @@ class CttApiController extends ControllerBase {
       }
     }
 
+    $studyDataAcquisitionFiles = $this->listStudyDataAcquisitionFiles($studyUri, $request);
+
     if (!$associationInput['provided']) {
       return new JsonResponse([
         'isValid' => TRUE,
@@ -4993,6 +6593,7 @@ class CttApiController extends ControllerBase {
         'studyUri' => $studyUri,
         'processUri' => $processUri !== '' ? $processUri : NULL,
         'associations' => $storedAssociations,
+        'studyDataAcquisitionFiles' => $studyDataAcquisitionFiles,
         'source' => 'stored',
       ]);
     }
@@ -5025,6 +6626,7 @@ class CttApiController extends ControllerBase {
       'studyUri' => $studyUri,
       'processUri' => $processUri !== '' ? $processUri : NULL,
       'associations' => $effectiveAssociations,
+      'studyDataAcquisitionFiles' => $studyDataAcquisitionFiles,
       'source' => $updated ? 'request' : 'stored',
     ]);
   }

@@ -49,6 +49,24 @@
     return /^https?:\/\//i.test(String(value || "").trim());
   };
 
+  const extractUriFromAutocompleteValue = function (value) {
+    const normalized = String(value || "").trim();
+    if (normalized === "") {
+      return "";
+    }
+
+    if (isHttpUri(normalized)) {
+      return normalized;
+    }
+
+    const match = normalized.match(/\[(https?:\/\/[^\]\s]+)\]\s*$/i);
+    if (match && match[1]) {
+      return String(match[1]).trim();
+    }
+
+    return "";
+  };
+
   const normalizeUriFieldValue = function (element) {
     if (!element) {
       return "";
@@ -57,6 +75,26 @@
     const normalized = String(element.value || "").trim();
     element.value = normalized;
     return normalized;
+  };
+
+  const deriveLanguageFromFilename = function (filename) {
+    const value = String(filename || "").trim().toLowerCase();
+    if (value.endsWith(".r")) {
+      return "R";
+    }
+    if (value.endsWith(".py")) {
+      return "Python";
+    }
+    if (value.endsWith(".sql")) {
+      return "SQL";
+    }
+    if (value.endsWith(".js")) {
+      return "JavaScript";
+    }
+    if (value.endsWith(".ts")) {
+      return "TypeScript";
+    }
+    return "";
   };
 
   const validateOptionalUriField = function (value, label) {
@@ -531,9 +569,53 @@
     if (state.toolUri) {
       state.toolUri.value = "";
     }
-    if (state.toolProcessUri && state.initialProcessUri) {
-      state.toolProcessUri.value = state.initialProcessUri;
+    if (state.toolProcessName) {
+      state.toolProcessName.value = String(state.initialProcessDisplayValue || "").trim();
     }
+    if (state.toolProcessUri) {
+      state.toolProcessUri.value = String(state.initialProcessUri || "").trim();
+    }
+    if (state.toolSourceFile) {
+      state.toolSourceFile.value = "";
+    }
+    if (state.toolLanguage) {
+      state.toolLanguage.value = "";
+    }
+    if (state.toolOwnerPersonUri) {
+      state.toolOwnerPersonUri.value = String(state.currentUserPersonUri || "").trim();
+    }
+  };
+
+  const applySelectedSourceFile = function (state) {
+    const file = state.toolSourceFile && state.toolSourceFile.files && state.toolSourceFile.files.length > 0
+      ? state.toolSourceFile.files[0]
+      : null;
+
+    if (!file) {
+      return;
+    }
+
+    const fileName = String(file.name || "").trim();
+    if (fileName !== "") {
+      if (state.toolArtifactFilename) {
+        state.toolArtifactFilename.value = fileName;
+      }
+      if (state.toolLanguage) {
+        const inferredLanguage = deriveLanguageFromFilename(fileName);
+        if (inferredLanguage !== "") {
+          state.toolLanguage.value = inferredLanguage;
+        }
+      }
+    }
+  };
+
+  const syncProcessUriFromInput = function (state) {
+    const raw = String(state.toolProcessName && state.toolProcessName.value || "").trim();
+    const uri = extractUriFromAutocompleteValue(raw);
+    if (state.toolProcessUri) {
+      state.toolProcessUri.value = uri;
+    }
+    return uri;
   };
 
   const fillEditorForm = function (state, tool) {
@@ -544,47 +626,27 @@
     if (state.toolUri) {
       state.toolUri.value = String(tool.toolUri || "");
     }
-    if (state.toolName) {
-      state.toolName.value = String(tool.name || "");
-    }
     if (state.toolVersion) {
       state.toolVersion.value = String(tool.version || "");
     }
     if (state.toolLanguage) {
       state.toolLanguage.value = String(tool.language || "");
     }
-    if (state.toolReleaseDate) {
-      state.toolReleaseDate.value = String(tool.releaseDate || "");
-    }
-    if (state.toolAuthor) {
-      state.toolAuthor.value = String(tool.author || "");
-    }
-    if (state.toolInstitution) {
-      state.toolInstitution.value = String(tool.institution || "");
-    }
     if (state.toolProcessUri) {
       state.toolProcessUri.value = String(tool.processUri || "");
+    }
+    if (state.toolProcessName) {
+      const processUri = String(tool.processUri || "").trim();
+      const processLabel = String(tool.processLabel || "").trim();
+      state.toolProcessName.value = processLabel !== "" && processUri !== ""
+        ? processLabel + " [" + processUri + "]"
+        : processUri;
     }
     if (state.toolOwnerPersonUri) {
       state.toolOwnerPersonUri.value = String(tool.ownerPersonUri || "");
     }
-    if (state.toolScenarioUri) {
-      state.toolScenarioUri.value = String(tool.scenarioUri || "");
-    }
-    if (state.toolDatasetUri) {
-      state.toolDatasetUri.value = String(tool.datasetUri || "");
-    }
-    if (state.toolSourceUri) {
-      state.toolSourceUri.value = String(tool.sourceRepositoryUri || "");
-    }
     if (state.toolArtifactFilename) {
       state.toolArtifactFilename.value = String(tool.artifactFilename || "");
-    }
-    if (state.toolArtifactUri) {
-      state.toolArtifactUri.value = String(tool.artifactUri || "");
-    }
-    if (state.toolTags) {
-      state.toolTags.value = toTagArray(tool.tags).join(", ");
     }
     if (state.toolDescription) {
       state.toolDescription.value = String(tool.description || "");
@@ -610,30 +672,32 @@
   };
 
   const saveTool = async function (state) {
-    const name = String(state.toolName && state.toolName.value || "").trim();
-    if (name === "") {
-      setFeedback(state, "warning", "Tool name is required.");
+    const sourceFile = state.toolSourceFile && state.toolSourceFile.files && state.toolSourceFile.files.length > 0
+      ? state.toolSourceFile.files[0]
+      : null;
+
+    if (sourceFile) {
+      applySelectedSourceFile(state);
+    }
+
+    const toolUri = String(state.toolUri && state.toolUri.value || "").trim();
+    const isCreate = toolUri === "";
+
+    if (isCreate && !sourceFile) {
+      setFeedback(state, "warning", "A local source file is required when adding a new tool.");
       return;
     }
 
-    const processUri = normalizeUriFieldValue(state.toolProcessUri);
-    const scenarioUri = normalizeUriFieldValue(state.toolScenarioUri);
-    const datasetUri = normalizeUriFieldValue(state.toolDatasetUri);
-    const sourceRepositoryUri = normalizeUriFieldValue(state.toolSourceUri);
-    const artifactUri = normalizeUriFieldValue(state.toolArtifactUri);
+    const processUri = syncProcessUriFromInput(state);
     const ownerPersonUri = normalizeUriFieldValue(state.toolOwnerPersonUri);
 
     const uriChecks = [
       validateOptionalUriField(processUri, "Process URI"),
-      validateOptionalUriField(scenarioUri, "Scenario URI"),
-      validateOptionalUriField(datasetUri, "Dataset URI"),
-      validateOptionalUriField(sourceRepositoryUri, "Source Repository URI"),
-      validateOptionalUriField(artifactUri, "Artifact URI"),
       validateOptionalUriField(ownerPersonUri, "Owner Person URI")
     ];
 
     if (processUri === "") {
-      setFeedback(state, "warning", "Process URI is required.");
+      setFeedback(state, "warning", "Process Name is required. Select an autocomplete option or paste a process URI.");
       return;
     }
 
@@ -644,28 +708,69 @@
       }
     }
 
+    let sourceCode = "";
+    let sourceFilename = "";
+    let inferredLanguage = "";
+    if (sourceFile) {
+      if (Number(sourceFile.size || 0) > 1024 * 1024) {
+        setFeedback(state, "warning", "Selected source file is too large (max 1 MB).");
+        return;
+      }
+
+      sourceFilename = String(sourceFile.name || "").trim();
+      sourceCode = await sourceFile.text();
+      inferredLanguage = deriveLanguageFromFilename(sourceFilename);
+      if (state.toolLanguage) {
+        state.toolLanguage.value = inferredLanguage;
+      }
+
+      if (sourceCode.indexOf("\u0000") !== -1) {
+        setFeedback(state, "warning", "Selected source file appears to be binary. Please choose a text source file.");
+        return;
+      }
+    }
+
+    if (!sourceFile) {
+      inferredLanguage = String(state.toolLanguage && state.toolLanguage.value || "").trim();
+    }
+
+    const inferredName = sourceFilename !== ""
+      ? sourceFilename
+      : String(state.toolArtifactFilename && state.toolArtifactFilename.value || "").trim();
+    if (inferredName === "") {
+      setFeedback(state, "warning", "Tool filename is required to infer the tool label.");
+      return;
+    }
+
+    const releaseDateNow = new Date().toISOString().slice(0, 10);
+
+    const institution = String(state.currentUserInstitutionUri || state.currentUserInstitutionLabel || "").trim();
+
     const payload = {
       action: "upsert",
       tool: {
-        toolUri: String(state.toolUri && state.toolUri.value || "").trim(),
-        name: name,
+        toolUri: toolUri,
+        name: inferredName,
         processUri: processUri,
         ownerPersonUri: ownerPersonUri,
         version: String(state.toolVersion && state.toolVersion.value || "").trim(),
-        language: String(state.toolLanguage && state.toolLanguage.value || "").trim(),
-          status: "current",
-        releaseDate: String(state.toolReleaseDate && state.toolReleaseDate.value || "").trim(),
-        author: String(state.toolAuthor && state.toolAuthor.value || "").trim(),
-        institution: String(state.toolInstitution && state.toolInstitution.value || "").trim(),
-        scenarioUri: scenarioUri,
-        datasetUri: datasetUri,
-        sourceRepositoryUri: sourceRepositoryUri,
+        language: inferredLanguage,
+        status: "current",
+        releaseDate: releaseDateNow,
         artifactFilename: String(state.toolArtifactFilename && state.toolArtifactFilename.value || "").trim(),
-        artifactUri: artifactUri,
-        tags: toTagArray(state.toolTags && state.toolTags.value || ""),
+        institution: institution,
         description: String(state.toolDescription && state.toolDescription.value || "").trim(),
       },
     };
+
+    if (sourceFilename !== "") {
+      payload.tool.sourceFilename = sourceFilename;
+    }
+
+    if (sourceCode !== "") {
+      payload.tool.sourceCode = sourceCode;
+      payload.tool.sourceCodeEncoding = "text/plain";
+    }
 
     const result = await postAction(state, payload);
     if (!result.ok || !result.payload || result.payload.isValid === false) {
@@ -789,20 +894,13 @@
           filterDatasetUri: root.querySelector("#ctt-tools-filter-dataset-uri"),
           editorForm: root.querySelector("#ctt-tools-editor-form"),
           toolUri: root.querySelector("#ctt-tool-uri"),
-          toolName: root.querySelector("#ctt-tool-name"),
           toolVersion: root.querySelector("#ctt-tool-version"),
           toolLanguage: root.querySelector("#ctt-tool-language"),
-          toolReleaseDate: root.querySelector("#ctt-tool-release-date"),
-          toolAuthor: root.querySelector("#ctt-tool-author"),
-          toolInstitution: root.querySelector("#ctt-tool-institution"),
+          toolProcessName: root.querySelector("#ctt-tool-process-name"),
           toolProcessUri: root.querySelector("#ctt-tool-process-uri"),
           toolOwnerPersonUri: root.querySelector("#ctt-tool-owner-person-uri"),
-          toolScenarioUri: root.querySelector("#ctt-tool-scenario-uri"),
-          toolDatasetUri: root.querySelector("#ctt-tool-dataset-uri"),
-          toolSourceUri: root.querySelector("#ctt-tool-source-uri"),
+          toolSourceFile: root.querySelector("#ctt-tool-source-file"),
           toolArtifactFilename: root.querySelector("#ctt-tool-artifact-filename"),
-          toolArtifactUri: root.querySelector("#ctt-tool-artifact-uri"),
-          toolTags: root.querySelector("#ctt-tool-tags"),
           toolDescription: root.querySelector("#ctt-tool-description"),
           resetButton: root.querySelector("#ctt-tool-reset"),
           tableBody: root.querySelector("#ctt-tools-repository-body"),
@@ -811,7 +909,12 @@
           collectionPageUrl: String(settings.collectionPageUrl || "").trim(),
           editorToolUri: String(settings.editorToolUri || "").trim(),
           initialProcessUri: String(settings.initialProcessUri || "").trim(),
+          initialProcessDisplayValue: String(settings.initialProcessDisplayValue || "").trim(),
           initialScenarioUri: String(settings.initialScenarioUri || "").trim(),
+          currentUserEmail: String(settings.currentUserEmail || "").trim(),
+          currentUserPersonUri: String(settings.currentUserPersonUri || "").trim(),
+          currentUserInstitutionUri: String(settings.currentUserInstitutionUri || "").trim(),
+          currentUserInstitutionLabel: String(settings.currentUserInstitutionLabel || "").trim(),
         };
 
         if (state.filterScenarioUri && settings.initialScenarioUri) {
@@ -838,6 +941,21 @@
           });
         }
 
+        if (state.toolProcessName) {
+          state.toolProcessName.addEventListener("change", function () {
+            syncProcessUriFromInput(state);
+          });
+          state.toolProcessName.addEventListener("blur", function () {
+            syncProcessUriFromInput(state);
+          });
+        }
+
+        if (state.toolSourceFile) {
+          state.toolSourceFile.addEventListener("change", function () {
+            applySelectedSourceFile(state);
+          });
+        }
+
         if (state.resetButton) {
           state.resetButton.addEventListener("click", function (event) {
             event.preventDefault();
@@ -861,6 +979,9 @@
         }
 
         if (state.mode === "editor") {
+          if (state.toolOwnerPersonUri && String(state.toolOwnerPersonUri.value || "").trim() === "") {
+            state.toolOwnerPersonUri.value = String(state.currentUserPersonUri || "").trim();
+          }
           if (state.editorToolUri !== "") {
             loadSingleToolForEditor(state, state.editorToolUri);
           }

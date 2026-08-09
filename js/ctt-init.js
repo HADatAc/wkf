@@ -589,6 +589,37 @@
     var activePlatformKey = 'all';
     var currentListItems = [];
     var listEndpointPath = normalizePathname(String(settings.apiBaseUrl || '') + '/instrument/list');
+    var componentsEndpointPath = normalizePathname(String(settings.apiBaseUrl || '') + '/instrument/components');
+    var prefilterEndpoint = String(context.prefilterEndpoint || '').trim();
+    var prefilterEndpointPath = normalizePathname(prefilterEndpoint);
+    var prefilteredInstruments = null;
+    var prefilteredComponentsByInstrument = {};
+    var prefilterRequestPromise = null;
+    var modalRefreshScheduled = false;
+    var modalRefreshInProgress = false;
+    var instrumentRerenderPending = false;
+
+    function scheduleModalRefresh(delayMs) {
+      if (modalRefreshScheduled) {
+        return;
+      }
+
+      modalRefreshScheduled = true;
+      window.setTimeout(function () {
+        modalRefreshScheduled = false;
+        if (modalRefreshInProgress) {
+          return;
+        }
+
+        modalRefreshInProgress = true;
+        try {
+          refreshModalEnhancements();
+        }
+        finally {
+          modalRefreshInProgress = false;
+        }
+      }, typeof delayMs === 'number' ? delayMs : 0);
+    }
 
     function filterInstrumentArray(items) {
       if (!Array.isArray(items)) {
@@ -673,6 +704,128 @@
       }
 
       return cloned;
+    }
+
+    function normalizePrefilterInstrumentPayload(payload) {
+      var root = payload && typeof payload === 'object' ? payload : {};
+      var packed = root.payload && typeof root.payload === 'object' ? root.payload : root;
+      var rows = Array.isArray(packed.instruments) ? packed.instruments : [];
+      var normalized = [];
+      var componentMap = {};
+
+      rows.forEach(function (row) {
+        if (!row || typeof row !== 'object') {
+          return;
+        }
+
+        var uri = String(row.uri || row.hasURI || row.instrumentUri || '').trim();
+        if (!uri) {
+          return;
+        }
+
+        var key = normalizeUriKey(uri);
+        if (!key) {
+          return;
+        }
+
+        var label = String(row.label || row.name || uri).trim();
+        var status = String(row.hasStatus || row.status || '').trim();
+
+        var components = Array.isArray(row.components)
+          ? row.components
+              .map(function (component) {
+                if (!component || typeof component !== 'object') {
+                  return null;
+                }
+
+                var componentUri = String(component.uri || component.hasURI || component.componentUri || '').trim();
+                if (!componentUri) {
+                  return null;
+                }
+
+                return {
+                  uri: componentUri,
+                  hasURI: componentUri,
+                  label: String(component.label || component.name || componentUri).trim(),
+                  hasStatus: String(component.hasStatus || component.status || '').trim()
+                };
+              })
+              .filter(Boolean)
+          : [];
+
+        componentMap[key] = components;
+
+        normalized.push({
+          uri: uri,
+          hasURI: uri,
+          label: label || uri,
+          hasStatus: status
+        });
+      });
+
+      prefilteredComponentsByInstrument = componentMap;
+      return normalized;
+    }
+
+    function loadPrefilterInstruments(originalFetch) {
+      if (!prefilterEndpointPath || typeof originalFetch !== 'function') {
+        return Promise.resolve(null);
+      }
+      if (Array.isArray(prefilteredInstruments)) {
+        return Promise.resolve(prefilteredInstruments);
+      }
+      if (prefilterRequestPromise) {
+        return prefilterRequestPromise;
+      }
+
+      var endpointUrl = prefilterEndpoint;
+      var separator = endpointUrl.indexOf('?') === -1 ? '?' : '&';
+      var studyUri = String(settings.studyUri || '').trim();
+      var processUri = String(settings.processUri || '').trim();
+      if (studyUri) {
+        endpointUrl += separator + 'studyUri=' + encodeURIComponent(studyUri);
+        separator = '&';
+      }
+      if (processUri) {
+        endpointUrl += separator + 'processUri=' + encodeURIComponent(processUri);
+        separator = '&';
+      }
+      if (organizationUri) {
+        endpointUrl += separator + 'organizationUri=' + encodeURIComponent(organizationUri);
+        separator = '&';
+      }
+      if (Array.isArray(context.organizationScopeUris) && context.organizationScopeUris.length) {
+        endpointUrl += separator + 'organizationScopeUris=' + encodeURIComponent(context.organizationScopeUris.join(','));
+      }
+
+      prefilterRequestPromise = originalFetch(endpointUrl, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          Accept: 'application/json'
+        }
+      }).then(function (response) {
+        if (!response || !response.ok) {
+          return null;
+        }
+        return response.json().catch(function () {
+          return null;
+        });
+      }).then(function (payload) {
+        if (!payload || payload.ok !== true) {
+          return null;
+        }
+
+        var normalized = normalizePrefilterInstrumentPayload(payload);
+        prefilteredInstruments = normalized;
+        return normalized;
+      }).catch(function () {
+        return null;
+      }).finally(function () {
+        prefilterRequestPromise = null;
+      });
+
+      return prefilterRequestPromise;
     }
 
     function renameModalHeadingAndSummary() {
@@ -897,6 +1050,10 @@
     }
 
     function triggerInstrumentListRerender() {
+      if (instrumentRerenderPending) {
+        return;
+      }
+
       var leftPanel = resolveModalLeftPanel();
       if (!leftPanel) {
         return;
@@ -908,6 +1065,7 @@
         return;
       }
 
+      instrumentRerenderPending = true;
       var original = String(searchInput.value || '');
       searchInput.value = original + ' ';
       searchInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -915,7 +1073,10 @@
       window.setTimeout(function () {
         searchInput.value = original;
         searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-        window.setTimeout(applyPlatformFilterToRenderedList, 30);
+        window.setTimeout(function () {
+          applyPlatformFilterToRenderedList();
+          instrumentRerenderPending = false;
+        }, 30);
       }, 0);
     }
 
@@ -959,7 +1120,10 @@
       });
 
       html += '</select>';
-      wrapper.innerHTML = html;
+      if (wrapper.getAttribute('data-ctt-platform-filter-html') !== html) {
+        wrapper.innerHTML = html;
+        wrapper.setAttribute('data-ctt-platform-filter-html', html);
+      }
 
       var select = wrapper.querySelector('[data-ctt-platform-filter-select="1"]');
       if (!select || select.getAttribute('data-ctt-platform-filter-bound') === '1') {
@@ -982,11 +1146,11 @@
 
     if (typeof MutationObserver === 'function' && document && document.body) {
       var observer = new MutationObserver(function () {
-        refreshModalEnhancements();
+        scheduleModalRefresh(30);
       });
       observer.observe(document.body, { childList: true, subtree: true });
     }
-    refreshModalEnhancements();
+    scheduleModalRefresh(0);
 
     if (typeof window.fetch !== 'function' || !listEndpointPath) {
       window.__cttInstrumentSelectionBridgeInstalled = true;
@@ -995,9 +1159,55 @@
 
     var originalFetch = window.fetch.bind(window);
 
+    loadPrefilterInstruments(originalFetch).then(function () {
+      scheduleModalRefresh(0);
+    });
+
     window.fetch = function (resource, init) {
       var requestUrl = getRequestUrl(resource);
       var requestPath = normalizePathname(requestUrl);
+
+      if (requestPath && requestPath === componentsEndpointPath && prefilterEndpointPath) {
+        var parsedComponentsUrl = parseUrl(requestUrl);
+        var componentsInstrumentUri = parsedComponentsUrl ? String(parsedComponentsUrl.searchParams.get('uri') || '').trim() : '';
+        var componentsKey = normalizeUriKey(componentsInstrumentUri);
+        if (componentsKey && Array.isArray(prefilteredComponentsByInstrument[componentsKey])) {
+          return Promise.resolve(new Response(JSON.stringify(prefilteredComponentsByInstrument[componentsKey]), {
+            status: 200,
+            statusText: 'OK',
+            headers: {
+              'content-type': 'application/json'
+            }
+          }));
+        }
+
+        return Promise.resolve(new Response(JSON.stringify([]), {
+          status: 200,
+          statusText: 'OK',
+          headers: {
+            'content-type': 'application/json'
+          }
+        }));
+      }
+
+      if (requestPath && requestPath === listEndpointPath && prefilterEndpointPath) {
+        return loadPrefilterInstruments(originalFetch).then(function (prefilteredRows) {
+          if (!Array.isArray(prefilteredRows)) {
+            prefilteredRows = [];
+          }
+
+          var filteredPrefilterPayload = filterInstrumentPayload(prefilteredRows);
+          window.setTimeout(scheduleModalRefresh, 20);
+
+          return new Response(JSON.stringify(filteredPrefilterPayload), {
+            status: 200,
+            statusText: 'OK',
+            headers: {
+              'content-type': 'application/json'
+            }
+          });
+        });
+      }
 
       var responsePromise = originalFetch(resource, init);
       if (!requestPath || requestPath !== listEndpointPath) {
@@ -1021,7 +1231,7 @@
             headers.set('content-type', 'application/json');
           }
 
-          window.setTimeout(refreshModalEnhancements, 20);
+          scheduleModalRefresh(20);
 
           return new Response(bodyText, {
             status: response.status,
