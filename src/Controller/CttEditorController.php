@@ -106,18 +106,33 @@ class CttEditorController extends ControllerBase {
     try {
       $api = \Drupal::service('rep.api_connector');
       $userEmail = '';
+      $userId = '';
+      $userName = '';
 
       try {
         $user = \Drupal\user\Entity\User::load($this->currentUser->id());
-        if ($user && is_string($user->getEmail())) {
-          $userEmail = trim((string) $user->getEmail());
+        if ($user) {
+          if (is_string($user->getEmail())) {
+            $userEmail = trim((string) $user->getEmail());
+          }
+          $userId = trim((string) $user->id());
+          $userName = trim((string) $user->getAccountName());
         }
       }
       catch (\Throwable $ignored) {
         $userEmail = '';
+        $userId = '';
+        $userName = '';
       }
 
-      if ($userEmail !== '') {
+      // 1) Prefer the affiliation from the Person linked to this Drupal user.
+      $linkedPersonContext = $this->resolveOrganizationContextFromLinkedPerson($userEmail, $userName, $userId);
+      if ($this->isUri((string) ($linkedPersonContext['organizationUri'] ?? ''))) {
+        $context = $linkedPersonContext;
+      }
+
+      // 2) Fallback: manager-owned organizations for this email.
+      if ($context['organizationUri'] === '' && $userEmail !== '') {
         $orgRaw = $api->listByManagerEmail('organization', $userEmail, 50, 0);
         $orgParsed = $api->parseObjectResponse($orgRaw, 'listByManagerEmail');
         $organizations = $this->normalizeApiListPayload($orgParsed);
@@ -135,34 +150,6 @@ class CttEditorController extends ControllerBase {
           $context['organizationUri'] = $orgUri;
           $context['organizationLabel'] = trim((string) ($organization->label ?? $organization->name ?? ''));
           break;
-        }
-
-        if ($context['organizationUri'] === '') {
-          $peopleRaw = $api->listByManagerEmail('person', $userEmail, 50, 0);
-          $peopleParsed = $api->parseObjectResponse($peopleRaw, 'listByManagerEmail');
-          $people = $this->normalizeApiListPayload($peopleParsed);
-
-          foreach ($people as $person) {
-            if (!is_object($person)) {
-              continue;
-            }
-
-            $affiliationUri = '';
-            if (isset($person->hasAffiliation)) {
-              $affiliationUri = $this->extractUriFromValue($person->hasAffiliation);
-            }
-            if ($affiliationUri === '' && isset($person->hasAffiliationUri) && is_string($person->hasAffiliationUri)) {
-              $affiliationUri = trim((string) $person->hasAffiliationUri);
-            }
-
-            if (!$this->isUri($affiliationUri)) {
-              continue;
-            }
-
-            $context['organizationUri'] = $affiliationUri;
-            $context['organizationLabel'] = trim((string) ($person->hasAffiliation->label ?? ''));
-            break;
-          }
         }
       }
 
@@ -182,6 +169,178 @@ class CttEditorController extends ControllerBase {
     }
 
     return $context;
+  }
+
+  /**
+   * Resolve organization context from Person linked to current user identifiers.
+   */
+  protected function resolveOrganizationContextFromLinkedPerson(string $userEmail, string $userName, string $userId): array {
+    $resolved = [
+      'organizationUri' => '',
+      'organizationLabel' => '',
+    ];
+
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return $resolved;
+    }
+
+    $api = \Drupal::service('rep.api_connector');
+    $normalizedEmail = $this->normalizeUserMatchEmail($userEmail);
+    $normalizedUserName = trim($userName);
+    $normalizedUserId = trim($userId);
+
+    $keywords = [];
+    foreach ([$normalizedEmail, $normalizedUserName, $normalizedUserId] as $seed) {
+      $seed = trim((string) $seed);
+      if ($seed !== '') {
+        $keywords[$seed] = $seed;
+      }
+    }
+
+    if ($normalizedEmail !== '' && str_contains($normalizedEmail, '@')) {
+      $localPart = trim((string) strstr($normalizedEmail, '@', TRUE));
+      if ($localPart !== '') {
+        $keywords[$localPart] = $localPart;
+      }
+    }
+
+    $candidates = [];
+    foreach (array_values($keywords) as $keyword) {
+      try {
+        $raw = $api->listByKeyword('person', $keyword, 200, 0);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $rows = $this->normalizeApiListPayload($parsed);
+        foreach ($rows as $row) {
+          if (!is_object($row)) {
+            continue;
+          }
+          $uri = trim((string) ($row->uri ?? $row->hasURI ?? ''));
+          if ($this->isUri($uri)) {
+            $candidates[$uri] = $row;
+          }
+        }
+      }
+      catch (\Throwable $ignored) {
+        // Try next keyword.
+      }
+    }
+
+    if (empty($candidates)) {
+      try {
+        $raw = $api->listByKeyword('person', '_', 9999, 0);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $rows = $this->normalizeApiListPayload($parsed);
+        foreach ($rows as $row) {
+          if (!is_object($row)) {
+            continue;
+          }
+          $uri = trim((string) ($row->uri ?? $row->hasURI ?? ''));
+          if ($this->isUri($uri)) {
+            $candidates[$uri] = $row;
+          }
+        }
+      }
+      catch (\Throwable $ignored) {
+        return $resolved;
+      }
+    }
+
+    foreach ($candidates as $candidate) {
+      if (!is_object($candidate)) {
+        continue;
+      }
+
+      $person = $candidate;
+      if (!$this->personMatchesLinkedUser($person, $normalizedEmail, $normalizedUserName, $normalizedUserId)) {
+        $hydrated = $this->hydratePersonForUserMatch($person);
+        if (!$this->personMatchesLinkedUser($hydrated, $normalizedEmail, $normalizedUserName, $normalizedUserId)) {
+          continue;
+        }
+        $person = $hydrated;
+      }
+
+      $affiliationUri = '';
+      if (isset($person->hasAffiliation)) {
+        $affiliationUri = $this->extractUriFromValue($person->hasAffiliation);
+      }
+      if ($affiliationUri === '' && isset($person->hasAffiliationUri) && is_string($person->hasAffiliationUri)) {
+        $affiliationUri = trim((string) $person->hasAffiliationUri);
+      }
+      if (!$this->isUri($affiliationUri)) {
+        continue;
+      }
+
+      $resolved['organizationUri'] = $affiliationUri;
+      $resolved['organizationLabel'] = trim((string) ($person->hasAffiliation->label ?? $person->hasAffiliation->name ?? ''));
+      return $resolved;
+    }
+
+    return $resolved;
+  }
+
+  /**
+   * Match a Person payload with Drupal user identifiers.
+   */
+  protected function personMatchesLinkedUser(object $person, string $email, string $username, string $userId): bool {
+    $kgUserId = trim((string) ($person->userID ?? ''));
+    if ($kgUserId !== '' && $userId !== '' && $kgUserId === $userId) {
+      return TRUE;
+    }
+
+    $emailCandidates = [
+      $this->normalizeUserMatchEmail((string) ($person->userEmail ?? '')),
+      $this->normalizeUserMatchEmail((string) ($person->mbox ?? '')),
+      $this->normalizeUserMatchEmail((string) ($person->hasSIRManagerEmail ?? '')),
+    ];
+
+    foreach ($emailCandidates as $candidate) {
+      if ($candidate !== '' && $email !== '' && $candidate === $email) {
+        return TRUE;
+      }
+    }
+
+    $kgUsername = trim((string) ($person->userName ?? ''));
+    return ($kgUsername !== '' && $username !== '' && strcasecmp($kgUsername, $username) === 0);
+  }
+
+  /**
+   * Normalize emails used to match linked users.
+   */
+  protected function normalizeUserMatchEmail(string $value): string {
+    $value = trim(strtolower($value));
+    if ($value === '') {
+      return '';
+    }
+
+    if (str_starts_with($value, 'mailto:')) {
+      $value = substr($value, 7);
+    }
+
+    return trim($value);
+  }
+
+  /**
+   * Hydrate sparse Person payload to include user linkage fields.
+   */
+  protected function hydratePersonForUserMatch(object $person): object {
+    $uri = trim((string) ($person->uri ?? $person->hasURI ?? ''));
+    if (!$this->isUri($uri) || !\Drupal::hasService('rep.api_connector')) {
+      return $person;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $raw = $api->getUri($uri);
+      $full = $api->parseObjectResponse($raw, 'getUri');
+      if (is_object($full)) {
+        return $full;
+      }
+    }
+    catch (\Throwable $ignored) {
+      // Keep original payload.
+    }
+
+    return $person;
   }
 
   /**
@@ -250,7 +409,9 @@ class CttEditorController extends ControllerBase {
   }
 
   /**
-   * Resolve direct/indirect organization scope for filtering.
+   * Resolve organization scope for filtering.
+   *
+    * Scope includes current organization plus ancestor/descendant organizations.
    *
    * @return string[]
    */
@@ -265,24 +426,30 @@ class CttEditorController extends ControllerBase {
 
     try {
       $api = \Drupal::service('rep.api_connector');
-      $org = $api->parseObjectResponse($api->getUri($normalizedRoot), 'getUri');
 
-      if (is_object($org)) {
-        foreach (['parentOrganizationUri', 'hasParentOrganizationUri', 'parentOrganization', 'hasParentOrganization', 'isPartOf', 'partOf'] as $key) {
-          if (!isset($org->{$key})) {
-            continue;
-          }
+      // Expand scope downward (descendants) and upward (ancestors) via SPARQL.
+      if (method_exists($api, 'sparqlQuery')) {
+        $sparqlChildren = 'SELECT DISTINCT ?child WHERE {'
+          . ' ?child (<https://schema.org/isPartOf>)+ <' . $normalizedRoot . '> .'
+          . '}';
 
-          $parentUri = $this->extractUriFromValue($org->{$key});
-          if ($parentUri !== '' && $this->isUri($parentUri)) {
-            $scope[$parentUri] = TRUE;
+        $rawChildren = $api->sparqlQuery($sparqlChildren);
+        $childrenDecoded = json_decode((string) $rawChildren, TRUE);
+        $childrenBindings = $childrenDecoded['results']['bindings'] ?? [];
+        if (is_array($childrenBindings)) {
+          foreach ($childrenBindings as $binding) {
+            if (!is_array($binding)) {
+              continue;
+            }
+            $childUri = trim((string) ($binding['child']['value'] ?? ''));
+            if ($this->isUri($childUri)) {
+              $scope[$childUri] = TRUE;
+            }
           }
         }
-      }
 
-      if (method_exists($api, 'sparqlQuery')) {
         $sparqlParents = 'SELECT DISTINCT ?parent WHERE {'
-          . ' <' . $normalizedRoot . '> <https://schema.org/isPartOf> ?parent .'
+          . ' <' . $normalizedRoot . '> (<https://schema.org/isPartOf>)+ ?parent .'
           . '}';
 
         $rawParents = $api->sparqlQuery($sparqlParents);
@@ -299,22 +466,87 @@ class CttEditorController extends ControllerBase {
             }
           }
         }
+      }
 
-        $sparqlChildren = 'SELECT DISTINCT ?child WHERE {'
-          . ' ?child <https://schema.org/isPartOf> <' . $normalizedRoot . '> .'
-          . '}';
+      // Fallback/augmentation based on explicit parent fields from organization payloads.
+      $organizations = [];
+      $pageSize = 200;
+      $maxPages = 15;
+      for ($page = 0; $page < $maxPages; $page++) {
+        $offset = $page * $pageSize;
+        $raw = $api->listByKeyword('organization', '_', $pageSize, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $chunk = $this->normalizeApiListPayload($parsed);
+        if (empty($chunk)) {
+          break;
+        }
+        foreach ($chunk as $org) {
+          if (is_object($org)) {
+            $organizations[] = $org;
+          }
+        }
+        if (count($chunk) < $pageSize) {
+          break;
+        }
+      }
 
-        $rawChildren = $api->sparqlQuery($sparqlChildren);
-        $childrenDecoded = json_decode((string) $rawChildren, TRUE);
-        $childrenBindings = $childrenDecoded['results']['bindings'] ?? [];
-        if (is_array($childrenBindings)) {
-          foreach ($childrenBindings as $binding) {
-            if (!is_array($binding)) {
-              continue;
+      if (!empty($organizations)) {
+        $parentByChild = [];
+        foreach ($organizations as $org) {
+          $childUri = trim((string) ($org->uri ?? $org->hasURI ?? ''));
+          if (!$this->isUri($childUri)) {
+            continue;
+          }
+
+          $parentUri = '';
+          foreach (['parentOrganizationUri', 'hasParentOrganizationUri', 'partOfUri'] as $key) {
+            if (isset($org->{$key}) && is_string($org->{$key})) {
+              $candidate = trim((string) $org->{$key});
+              if ($this->isUri($candidate)) {
+                $parentUri = $candidate;
+                break;
+              }
             }
-            $childUri = trim((string) ($binding['child']['value'] ?? ''));
-            if ($this->isUri($childUri)) {
+          }
+          if ($parentUri === '') {
+            foreach (['parentOrganization', 'hasParentOrganization', 'partOf', 'isPartOf'] as $key) {
+              if (!isset($org->{$key})) {
+                continue;
+              }
+              $candidate = $this->extractUriFromValue($org->{$key});
+              if ($this->isUri($candidate)) {
+                $parentUri = $candidate;
+                break;
+              }
+            }
+          }
+
+          if ($this->isUri($parentUri)) {
+            $parentByChild[$childUri] = $parentUri;
+          }
+        }
+
+        // Upward closure.
+        $added = TRUE;
+        while ($added) {
+          $added = FALSE;
+          foreach (array_keys($scope) as $candidateUri) {
+            $parentUri = trim((string) ($parentByChild[$candidateUri] ?? ''));
+            if ($this->isUri($parentUri) && !isset($scope[$parentUri])) {
+              $scope[$parentUri] = TRUE;
+              $added = TRUE;
+            }
+          }
+        }
+
+        // Downward closure.
+        $added = TRUE;
+        while ($added) {
+          $added = FALSE;
+          foreach ($parentByChild as $childUri => $parentUri) {
+            if (isset($scope[$parentUri]) && !isset($scope[$childUri])) {
               $scope[$childUri] = TRUE;
+              $added = TRUE;
             }
           }
         }
@@ -383,7 +615,9 @@ class CttEditorController extends ControllerBase {
           }
 
           $partOfKey = $this->normalizeUriKey($partOfUri);
-          if ($partOfKey === '' || !isset($scopeKeys[$partOfKey])) {
+          $partOfMatchesScope = ($partOfKey !== '' && isset($scopeKeys[$partOfKey]));
+
+          if (!$partOfMatchesScope) {
             continue;
           }
 

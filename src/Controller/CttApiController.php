@@ -22,6 +22,7 @@ class CttApiController extends ControllerBase {
 
   private const PMSR_ADMIN_OWNER_EMAIL = 'admin@pmsr.com';
   private const ANY_PROCESS_URI = 'http://hadatac.org/ont/hasco/AnyProcess';
+  private const TASK_SIMULATOR_ASSIGNMENT_KV_COLLECTION = 'ctt.task_simulator_assignment.v1';
 
   /**
    * @var \Drupal\ctt\Service\CttHascoClient
@@ -3663,10 +3664,25 @@ class CttApiController extends ControllerBase {
    */
   public function getProcess(Request $request) {
     try {
-      $uri = $request->query->get('uri', '');
-      $result = $this->hascoClient->getByUri($uri);
-      if (is_array($result) && $this->isUri(trim((string) $uri))) {
-        $this->cacheProcessOwnershipContext(trim((string) $uri), $result);
+      $requestedUri = $this->decodeMaybeEncodedUri((string) $request->query->get('uri', ''));
+      if (!$this->isUri(trim($requestedUri))) {
+        return new JsonResponse(['error' => 'Missing or invalid process URI.'], 400);
+      }
+
+      $resolvedUri = $this->resolveExistingProcessUriVariant($requestedUri);
+      $lookupUri = $this->isUri($resolvedUri) ? $resolvedUri : $requestedUri;
+
+      $result = $this->hascoClient->getByUri($lookupUri);
+      if (is_array($result) && !empty($result['error']) && $lookupUri !== $requestedUri) {
+        $fallback = $this->hascoClient->getByUri($requestedUri);
+        if (!(is_array($fallback) && !empty($fallback['error']))) {
+          $result = $fallback;
+          $lookupUri = $requestedUri;
+        }
+      }
+
+      if (is_array($result) && $this->isUri(trim((string) $lookupUri))) {
+        $this->cacheProcessOwnershipContext(trim((string) $lookupUri), $result);
       }
       return new JsonResponse($result);
     }
@@ -3685,9 +3701,20 @@ class CttApiController extends ControllerBase {
         return new JsonResponse(['error' => 'Missing or invalid process URI.'], 400);
       }
 
-      $result = $this->hascoClient->getTasksByProcess($uri);
+      $resolvedUri = $this->resolveExistingProcessUriVariant($uri);
+      $lookupUri = $this->isUri($resolvedUri) ? $resolvedUri : $uri;
+
+      $result = $this->hascoClient->getTasksByProcess($lookupUri);
+      if ((!is_array($result) || empty($result)) && $lookupUri !== $uri) {
+        $fallback = $this->hascoClient->getTasksByProcess($uri);
+        if (is_array($fallback) && !empty($fallback)) {
+          $result = $fallback;
+          $lookupUri = $uri;
+        }
+      }
+
       if (is_array($result)) {
-        $this->cacheTaskProcessMappings($result, $uri);
+        $this->cacheTaskProcessMappings($result, $lookupUri);
       }
 
       return new JsonResponse($result);
@@ -3884,7 +3911,7 @@ class CttApiController extends ControllerBase {
    */
   public function getProcessTree(Request $request) {
     try {
-      $uri = trim((string) $request->query->get('uri', ''));
+      $uri = trim($this->decodeMaybeEncodedUri((string) $request->query->get('uri', '')));
       if (!$this->isUri($uri)) {
         return new JsonResponse([
           'error' => 'Missing or invalid process URI.',
@@ -3892,7 +3919,18 @@ class CttApiController extends ControllerBase {
         ], 400);
       }
 
-      $process = $this->hascoClient->getByUri($uri);
+      $resolvedUri = $this->resolveExistingProcessUriVariant($uri);
+      $lookupUri = $this->isUri($resolvedUri) ? $resolvedUri : $uri;
+
+      $process = $this->hascoClient->getByUri($lookupUri);
+      if (is_array($process) && !empty($process['error']) && $lookupUri !== $uri) {
+        $fallback = $this->hascoClient->getByUri($uri);
+        if (!(is_array($fallback) && !empty($fallback['error']))) {
+          $process = $fallback;
+          $lookupUri = $uri;
+        }
+      }
+
       if (is_array($process) && !empty($process['error'])) {
         return new JsonResponse([
           'error' => 'Workflow process was not found in HASCOAPI.',
@@ -3901,10 +3939,17 @@ class CttApiController extends ControllerBase {
         ], 404);
       }
 
-      $tasks = $this->hascoClient->getTasksByProcess($uri);
+      $tasks = $this->hascoClient->getTasksByProcess($lookupUri);
+      if ((!is_array($tasks) || empty($tasks)) && $lookupUri !== $uri) {
+        $fallbackTasks = $this->hascoClient->getTasksByProcess($uri);
+        if (is_array($fallbackTasks) && !empty($fallbackTasks)) {
+          $tasks = $fallbackTasks;
+          $lookupUri = $uri;
+        }
+      }
 
-      if (is_array($process) && $this->isUri(trim((string) $uri))) {
-        $normalizedProcessUri = trim((string) $uri);
+      if (is_array($process) && $this->isUri(trim((string) $lookupUri))) {
+        $normalizedProcessUri = trim((string) $lookupUri);
         $this->cacheProcessOwnershipContext($normalizedProcessUri, $process);
         $this->cacheTaskProcessMappings($tasks, $normalizedProcessUri);
       }
@@ -4144,9 +4189,21 @@ class CttApiController extends ControllerBase {
 
     try {
       if ($processUri) {
-        $result = $this->hascoClient->getTasksByProcess($processUri);
-        if (is_array($result) && $this->isUri(trim((string) $processUri))) {
-          $this->cacheTaskProcessMappings($result, trim((string) $processUri));
+        $requestedProcessUri = trim($this->decodeMaybeEncodedUri((string) $processUri));
+        $resolvedProcessUri = $this->resolveExistingProcessUriVariant($requestedProcessUri);
+        $lookupProcessUri = $this->isUri($resolvedProcessUri) ? $resolvedProcessUri : $requestedProcessUri;
+
+        $result = $this->hascoClient->getTasksByProcess($lookupProcessUri);
+        if ((!is_array($result) || empty($result)) && $lookupProcessUri !== $requestedProcessUri) {
+          $fallback = $this->hascoClient->getTasksByProcess($requestedProcessUri);
+          if (is_array($fallback) && !empty($fallback)) {
+            $result = $fallback;
+            $lookupProcessUri = $requestedProcessUri;
+          }
+        }
+
+        if (is_array($result) && $this->isUri(trim((string) $lookupProcessUri))) {
+          $this->cacheTaskProcessMappings($result, trim((string) $lookupProcessUri));
         }
       }
       else {
@@ -4558,6 +4615,437 @@ class CttApiController extends ControllerBase {
     }
   }
 
+  /**
+   * Build stable key for task simulator assignment storage.
+   */
+  protected function taskSimulatorAssignmentKey(string $taskUri): string {
+    return 'task:' . sha1($this->normalizeUriKey($taskUri));
+  }
+
+  /**
+   * Return task simulator assignment store.
+   */
+  protected function getTaskSimulatorAssignmentStore() {
+    return \Drupal::keyValue(self::TASK_SIMULATOR_ASSIGNMENT_KV_COLLECTION);
+  }
+
+  /**
+   * Load one task assignment from local KV.
+   */
+  protected function loadTaskSimulatorAssignment(string $taskUri): ?array {
+    $taskUri = trim($taskUri);
+    if (!$this->isUri($taskUri)) {
+      return NULL;
+    }
+
+    $stored = $this->getTaskSimulatorAssignmentStore()->get($this->taskSimulatorAssignmentKey($taskUri));
+    if (!is_array($stored)) {
+      return NULL;
+    }
+
+    $platformInstanceUri = trim((string) ($stored['platformInstanceUri'] ?? ''));
+    $instrumentInstanceUri = trim((string) ($stored['instrumentInstanceUri'] ?? ''));
+    $componentInstanceUri = trim((string) ($stored['componentInstanceUri'] ?? ''));
+    if (!$this->isUri($platformInstanceUri) || !$this->isUri($instrumentInstanceUri) || !$this->isUri($componentInstanceUri)) {
+      return NULL;
+    }
+
+    return [
+      'taskUri' => $taskUri,
+      'platformInstanceUri' => $platformInstanceUri,
+      'platformInstanceLabel' => trim((string) ($stored['platformInstanceLabel'] ?? $platformInstanceUri)),
+      'instrumentInstanceUri' => $instrumentInstanceUri,
+      'instrumentInstanceLabel' => trim((string) ($stored['instrumentInstanceLabel'] ?? $instrumentInstanceUri)),
+      'componentInstanceUri' => $componentInstanceUri,
+      'componentInstanceLabel' => trim((string) ($stored['componentInstanceLabel'] ?? $componentInstanceUri)),
+      'instrumentUri' => trim((string) ($stored['instrumentUri'] ?? '')),
+      'instrumentLabel' => trim((string) ($stored['instrumentLabel'] ?? '')),
+      'componentUri' => trim((string) ($stored['componentUri'] ?? '')),
+      'componentLabel' => trim((string) ($stored['componentLabel'] ?? '')),
+      'savedAt' => (int) ($stored['savedAt'] ?? 0),
+    ];
+  }
+
+  /**
+   * Resolve deployment-backed simulator assignment options scoped by organization.
+   */
+  protected function buildSimulatorAssignmentOptions(?string $studyUri, ?string $processUri): array {
+    $context = $this->resolveCurrentUserOrganizationContext($studyUri);
+    $organizationUri = trim((string) ($context['organizationUri'] ?? ''));
+    $organizationLabel = trim((string) ($context['organizationLabel'] ?? ''));
+    $scopeUris = $this->resolveOrganizationScopeUris($organizationUri);
+    $platformDetails = $this->resolveOrganizationPlatformInstances($scopeUris);
+
+    $payload = [
+      'organizationUri' => $organizationUri,
+      'organizationLabel' => $organizationLabel,
+      'studyUri' => (string) $studyUri,
+      'processUri' => (string) $processUri,
+      'platformInstances' => [],
+      'instrumentInstances' => [],
+      'componentInstances' => [],
+    ];
+
+    if (empty($platformDetails) || !\Drupal::hasService('rep.api_connector')) {
+      return $payload;
+    }
+
+    $platformMap = [];
+    $platformKeys = [];
+    foreach ($platformDetails as $platformUri => $details) {
+      $platformMap[$platformUri] = [
+        'uri' => $platformUri,
+        'label' => trim((string) (is_array($details) ? ($details['label'] ?? $platformUri) : $details)),
+      ];
+      $platformKey = $this->normalizeUriKey($platformUri);
+      if ($platformKey !== '') {
+        $platformKeys[$platformKey] = $platformUri;
+      }
+    }
+
+    $instrumentMap = [];
+    $componentMap = [];
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $pageSize = 100;
+      $maxPages = 10;
+
+      for ($page = 0; $page < $maxPages; $page++) {
+        $offset = $page * $pageSize;
+        $raw = $api->listByKeyword('deployment', '_', $pageSize, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $chunk = $this->normalizeApiListPayload($parsed);
+        if (empty($chunk)) {
+          break;
+        }
+
+        foreach ($chunk as $deployment) {
+          if (!is_object($deployment)) {
+            continue;
+          }
+
+          $platformInstanceUri = '';
+          if (isset($deployment->platformInstance) && is_object($deployment->platformInstance)) {
+            $platformInstanceUri = trim((string) ($deployment->platformInstance->uri ?? ''));
+          }
+          if ($platformInstanceUri === '' && isset($deployment->platformInstanceUri) && is_string($deployment->platformInstanceUri)) {
+            $platformInstanceUri = trim((string) $deployment->platformInstanceUri);
+          }
+          $platformKey = $this->normalizeUriKey($platformInstanceUri);
+          if ($platformKey === '' || !isset($platformKeys[$platformKey])) {
+            continue;
+          }
+
+          $platformLabel = '';
+          if (isset($deployment->platformInstance) && is_object($deployment->platformInstance)) {
+            $platformLabel = trim((string) ($deployment->platformInstance->label ?? ''));
+          }
+          if ($platformLabel !== '') {
+            $platformMap[$platformInstanceUri]['label'] = $platformLabel;
+          }
+
+          $instrumentInstanceUri = '';
+          $instrumentInstanceLabel = '';
+          $instrumentUri = '';
+          $instrumentLabel = '';
+
+          if (isset($deployment->instrumentInstance) && is_object($deployment->instrumentInstance)) {
+            $instrumentInstanceUri = trim((string) ($deployment->instrumentInstance->uri ?? ''));
+            $instrumentInstanceLabel = trim((string) ($deployment->instrumentInstance->label ?? ''));
+            $instrumentUri = trim((string) ($deployment->instrumentInstance->typeUri ?? ''));
+            $instrumentLabel = trim((string) ($deployment->instrumentInstance->typeLabel ?? ''));
+            if ($instrumentLabel === '' && isset($deployment->instrumentInstance->type) && is_object($deployment->instrumentInstance->type)) {
+              $instrumentLabel = trim((string) ($deployment->instrumentInstance->type->label ?? ''));
+            }
+          }
+          if ($instrumentInstanceUri === '' && isset($deployment->instrumentInstanceUri) && is_string($deployment->instrumentInstanceUri)) {
+            $instrumentInstanceUri = trim((string) $deployment->instrumentInstanceUri);
+          }
+
+          if ($this->isUri($instrumentInstanceUri)) {
+            $instrumentMap[$instrumentInstanceUri] = [
+              'uri' => $instrumentInstanceUri,
+              'label' => $instrumentInstanceLabel !== '' ? $instrumentInstanceLabel : $instrumentInstanceUri,
+              'platformInstanceUri' => $platformInstanceUri,
+              'instrumentUri' => $this->isUri($instrumentUri) ? $instrumentUri : '',
+              'instrumentLabel' => $instrumentLabel,
+            ];
+          }
+
+          $componentInstances = [];
+          if (isset($deployment->componentInstance) && is_array($deployment->componentInstance)) {
+            $componentInstances = $deployment->componentInstance;
+          }
+          elseif (isset($deployment->componentInstanceUri) && is_array($deployment->componentInstanceUri)) {
+            foreach ($deployment->componentInstanceUri as $componentUriValue) {
+              if (!is_string($componentUriValue)) {
+                continue;
+              }
+              $componentInstances[] = (object) ['uri' => trim((string) $componentUriValue)];
+            }
+          }
+
+          foreach ($componentInstances as $componentInstance) {
+            if (!is_object($componentInstance)) {
+              continue;
+            }
+
+            $componentInstanceUri = trim((string) ($componentInstance->uri ?? ''));
+            if (!$this->isUri($componentInstanceUri)) {
+              continue;
+            }
+
+            $componentInstanceLabel = trim((string) ($componentInstance->label ?? $componentInstanceUri));
+            $componentUri = trim((string) ($componentInstance->typeUri ?? ''));
+            $componentLabel = trim((string) ($componentInstance->typeLabel ?? ''));
+            if ($componentLabel === '' && isset($componentInstance->type) && is_object($componentInstance->type)) {
+              $componentLabel = trim((string) ($componentInstance->type->label ?? ''));
+            }
+
+            $componentMap[$componentInstanceUri] = [
+              'uri' => $componentInstanceUri,
+              'label' => $componentInstanceLabel !== '' ? $componentInstanceLabel : $componentInstanceUri,
+              'instrumentInstanceUri' => $instrumentInstanceUri,
+              'platformInstanceUri' => $platformInstanceUri,
+              'componentUri' => $this->isUri($componentUri) ? $componentUri : '',
+              'componentLabel' => $componentLabel,
+            ];
+          }
+        }
+
+        if (count($chunk) < $pageSize) {
+          break;
+        }
+      }
+    }
+    catch (\Throwable $e) {
+      $this->getLogger('ctt')->warning('Simulator assignment options build failed: @message', [
+        '@message' => $e->getMessage(),
+      ]);
+    }
+
+    $payload['platformInstances'] = array_values($platformMap);
+    $payload['instrumentInstances'] = array_values($instrumentMap);
+    $payload['componentInstances'] = array_values($componentMap);
+
+    usort($payload['platformInstances'], fn($a, $b) => strcmp((string) ($a['label'] ?? ''), (string) ($b['label'] ?? '')));
+    usort($payload['instrumentInstances'], fn($a, $b) => strcmp((string) ($a['label'] ?? ''), (string) ($b['label'] ?? '')));
+    usort($payload['componentInstances'], fn($a, $b) => strcmp((string) ($a['label'] ?? ''), (string) ($b['label'] ?? '')));
+
+    return $payload;
+  }
+
+  /**
+   * GET /workflow/api/simulator-assignment/options
+   */
+  public function getSimulatorAssignmentOptions(Request $request) {
+    try {
+      $studyRaw = (string) $request->query->get('studyUri', '');
+      $processRaw = (string) $request->query->get('processUri', '');
+      $taskRaw = (string) $request->query->get('taskUri', '');
+
+      $studyUri = $studyRaw !== '' ? $this->decodeMaybeEncodedUri($studyRaw) : NULL;
+      $processUri = $processRaw !== '' ? $this->decodeMaybeEncodedUri($processRaw) : NULL;
+      $taskUri = $taskRaw !== '' ? $this->decodeMaybeEncodedUri($taskRaw) : '';
+
+      $payload = $this->buildSimulatorAssignmentOptions($studyUri, $processUri);
+      $payload['assignment'] = $taskUri !== '' ? $this->loadTaskSimulatorAssignment($taskUri) : NULL;
+
+      return new JsonResponse([
+        'ok' => TRUE,
+        'payload' => $payload,
+      ]);
+    }
+    catch (\Throwable $e) {
+      return new JsonResponse([
+        'ok' => FALSE,
+        'error' => $e->getMessage(),
+      ], 500);
+    }
+  }
+
+  /**
+   * GET /workflow/api/task/simulator-assignment
+   * Supports either ?uri=... for one task or ?processUri=... for process-wide mappings.
+   */
+  public function getTaskSimulatorAssignment(Request $request) {
+    try {
+      $taskRaw = (string) $request->query->get('uri', '');
+      $processRaw = (string) $request->query->get('processUri', '');
+
+      $taskUri = $taskRaw !== '' ? $this->decodeMaybeEncodedUri($taskRaw) : '';
+      $processUri = $processRaw !== '' ? $this->decodeMaybeEncodedUri($processRaw) : '';
+
+      if ($taskUri !== '') {
+        return new JsonResponse([
+          'ok' => TRUE,
+          'assignment' => $this->loadTaskSimulatorAssignment($taskUri),
+        ]);
+      }
+
+      if ($processUri !== '' && $this->isUri($processUri)) {
+        $tasks = $this->hascoClient->getTasksByProcess($processUri);
+        $rows = [];
+        if (is_array($tasks)) {
+          foreach ($tasks as $task) {
+            $taskCandidate = '';
+            if (is_array($task)) {
+              $taskCandidate = trim((string) ($task['uri'] ?? $task['hasURI'] ?? ''));
+            }
+            elseif (is_object($task)) {
+              $taskCandidate = trim((string) ($task->uri ?? $task->hasURI ?? ''));
+            }
+            if (!$this->isUri($taskCandidate)) {
+              continue;
+            }
+
+            $assignment = $this->loadTaskSimulatorAssignment($taskCandidate);
+            if ($assignment !== NULL) {
+              $rows[] = $assignment;
+            }
+          }
+        }
+
+        return new JsonResponse([
+          'ok' => TRUE,
+          'assignments' => $rows,
+        ]);
+      }
+
+      return new JsonResponse([
+        'ok' => TRUE,
+        'assignments' => [],
+      ]);
+    }
+    catch (\Throwable $e) {
+      return new JsonResponse([
+        'ok' => FALSE,
+        'error' => $e->getMessage(),
+      ], 500);
+    }
+  }
+
+  /**
+   * PUT /workflow/api/task/simulator-assignment?uri=...
+   */
+  public function setTaskSimulatorAssignment(Request $request) {
+    try {
+      $taskRaw = (string) $request->query->get('uri', '');
+      if ($taskRaw === '') {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Missing parameter: uri'], 400);
+      }
+
+      $taskUri = $this->decodeMaybeEncodedUri($taskRaw);
+      if (!$this->isUri($taskUri)) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Invalid task URI'], 400);
+      }
+
+      $ownerGuard = $this->enforceTaskOwnerForMutation((string) $taskUri);
+      if ($ownerGuard instanceof JsonResponse) {
+        return $ownerGuard;
+      }
+
+      $body = json_decode($request->getContent(), TRUE);
+      if (!is_array($body)) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Invalid JSON body'], 400);
+      }
+
+      $platformInstanceUri = trim((string) ($body['platformInstanceUri'] ?? ''));
+      $instrumentInstanceUri = trim((string) ($body['instrumentInstanceUri'] ?? ''));
+      $componentInstanceUri = trim((string) ($body['componentInstanceUri'] ?? ''));
+
+      if (!$this->isUri($platformInstanceUri) || !$this->isUri($instrumentInstanceUri) || !$this->isUri($componentInstanceUri)) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'platformInstanceUri, instrumentInstanceUri, and componentInstanceUri are required'], 400);
+      }
+
+      $assignmentPayload = $this->buildSimulatorAssignmentOptions(NULL, NULL);
+      $platformByUri = [];
+      foreach (($assignmentPayload['platformInstances'] ?? []) as $row) {
+        if (is_array($row) && $this->isUri((string) ($row['uri'] ?? ''))) {
+          $platformByUri[(string) $row['uri']] = $row;
+        }
+      }
+      $instrumentByUri = [];
+      foreach (($assignmentPayload['instrumentInstances'] ?? []) as $row) {
+        if (is_array($row) && $this->isUri((string) ($row['uri'] ?? ''))) {
+          $instrumentByUri[(string) $row['uri']] = $row;
+        }
+      }
+      $componentByUri = [];
+      foreach (($assignmentPayload['componentInstances'] ?? []) as $row) {
+        if (is_array($row) && $this->isUri((string) ($row['uri'] ?? ''))) {
+          $componentByUri[(string) $row['uri']] = $row;
+        }
+      }
+
+      if (!isset($platformByUri[$platformInstanceUri]) || !isset($instrumentByUri[$instrumentInstanceUri]) || !isset($componentByUri[$componentInstanceUri])) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Selected simulator mapping is outside the allowed organization scope'], 403);
+      }
+
+      $instrumentRow = $instrumentByUri[$instrumentInstanceUri];
+      $componentRow = $componentByUri[$componentInstanceUri];
+
+      if (trim((string) ($instrumentRow['platformInstanceUri'] ?? '')) !== $platformInstanceUri) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Instrument instance does not belong to selected platform instance'], 400);
+      }
+      if (trim((string) ($componentRow['instrumentInstanceUri'] ?? '')) !== $instrumentInstanceUri) {
+        return new JsonResponse(['ok' => FALSE, 'error' => 'Component instance does not belong to selected instrument instance'], 400);
+      }
+
+      $record = [
+        'taskUri' => $taskUri,
+        'platformInstanceUri' => $platformInstanceUri,
+        'platformInstanceLabel' => trim((string) ($platformByUri[$platformInstanceUri]['label'] ?? $platformInstanceUri)),
+        'instrumentInstanceUri' => $instrumentInstanceUri,
+        'instrumentInstanceLabel' => trim((string) ($instrumentRow['label'] ?? $instrumentInstanceUri)),
+        'componentInstanceUri' => $componentInstanceUri,
+        'componentInstanceLabel' => trim((string) ($componentRow['label'] ?? $componentInstanceUri)),
+        'instrumentUri' => trim((string) ($instrumentRow['instrumentUri'] ?? '')),
+        'instrumentLabel' => trim((string) ($instrumentRow['instrumentLabel'] ?? '')),
+        'componentUri' => trim((string) ($componentRow['componentUri'] ?? '')),
+        'componentLabel' => trim((string) ($componentRow['componentLabel'] ?? '')),
+        'savedAt' => time(),
+      ];
+
+      $this->getTaskSimulatorAssignmentStore()->set($this->taskSimulatorAssignmentKey($taskUri), $record);
+
+      // Keep compatibility with existing required-instrument task semantics.
+      $instrumentUri = trim((string) $record['instrumentUri']);
+      $componentUri = trim((string) $record['componentUri']);
+      if ($this->isUri($instrumentUri) && $this->isUri($componentUri)) {
+        $requiredInstrumentPayload = [
+          [
+            'instrumentUri' => $instrumentUri,
+            'requiredComponents' => [
+              [
+                'componentUri' => $componentUri,
+                'containerSlotUri' => '',
+              ],
+            ],
+          ],
+        ];
+        try {
+          $this->hascoClient->setTaskRequiredInstruments($taskUri, $requiredInstrumentPayload);
+        }
+        catch (\Throwable $ignored) {
+          // Persisted local simulator assignment remains authoritative for editor UX.
+        }
+      }
+
+      return new JsonResponse([
+        'ok' => TRUE,
+        'assignment' => $record,
+      ]);
+    }
+    catch (\Throwable $e) {
+      return new JsonResponse([
+        'ok' => FALSE,
+        'error' => $e->getMessage(),
+      ], 500);
+    }
+  }
+
   // ================================================================
   // Instrument endpoints
   // ================================================================
@@ -4735,16 +5223,31 @@ class CttApiController extends ControllerBase {
     try {
       $api = \Drupal::service('rep.api_connector');
       $userEmail = '';
+      $userId = '';
+      $userName = '';
       try {
         $user = \Drupal\user\Entity\User::load($this->currentUser()->id());
-        if ($user && is_string($user->getEmail())) {
-          $userEmail = trim((string) $user->getEmail());
+        if ($user) {
+          if (is_string($user->getEmail())) {
+            $userEmail = trim((string) $user->getEmail());
+          }
+          $userId = trim((string) $user->id());
+          $userName = trim((string) $user->getAccountName());
         }
       }
       catch (\Throwable $ignored) {
         $userEmail = '';
+        $userId = '';
+        $userName = '';
       }
 
+      // 1) Prefer the affiliation from the Person linked to this Drupal user.
+      $linkedPersonContext = $this->resolveOrganizationContextFromLinkedPerson($userEmail, $userName, $userId);
+      if ($this->isUri((string) ($linkedPersonContext['organizationUri'] ?? ''))) {
+        return $linkedPersonContext;
+      }
+
+      // 2) Fallback: manager-owned organizations for this email.
       if ($userEmail !== '') {
         $orgRaw = $api->listByManagerEmail('organization', $userEmail, 50, 0);
         $orgParsed = $api->parseObjectResponse($orgRaw, 'listByManagerEmail');
@@ -4764,35 +5267,8 @@ class CttApiController extends ControllerBase {
           $context['organizationLabel'] = trim((string) ($organization->label ?? $organization->name ?? ''));
           break;
         }
-
-        if ($context['organizationUri'] === '') {
-          $peopleRaw = $api->listByManagerEmail('person', $userEmail, 50, 0);
-          $peopleParsed = $api->parseObjectResponse($peopleRaw, 'listByManagerEmail');
-          $people = $this->normalizeApiListPayload($peopleParsed);
-
-          foreach ($people as $person) {
-            if (!is_object($person)) {
-              continue;
-            }
-
-            $affiliationUri = '';
-            if (isset($person->hasAffiliation)) {
-              $affiliationUri = $this->extractUriFromValue($person->hasAffiliation);
-            }
-            if ($affiliationUri === '' && isset($person->hasAffiliationUri) && is_string($person->hasAffiliationUri)) {
-              $affiliationUri = trim((string) $person->hasAffiliationUri);
-            }
-
-            if (!$this->isUri($affiliationUri)) {
-              continue;
-            }
-
-            $context['organizationUri'] = $affiliationUri;
-            $context['organizationLabel'] = trim((string) ($person->hasAffiliation->label ?? ''));
-            break;
-          }
-        }
       }
+
     }
     catch (\Throwable $ignored) {
       $context = [
@@ -4809,7 +5285,186 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * Resolve direct/indirect organization scope for filtering.
+   * Resolve organization context from Person linked to current user identifiers.
+   */
+  protected function resolveOrganizationContextFromLinkedPerson(string $userEmail, string $userName, string $userId): array {
+    $resolved = [
+      'organizationUri' => '',
+      'organizationLabel' => '',
+    ];
+                if (!\Drupal::hasService('rep.api_connector')) {
+                  return $resolved;
+                }
+
+                $api = \Drupal::service('rep.api_connector');
+
+                $normalizedEmail = $this->normalizeUserMatchEmail($userEmail);
+                $normalizedUserName = trim($userName);
+                $normalizedUserId = trim($userId);
+
+                $keywords = [];
+                foreach ([$normalizedEmail, $normalizedUserName, $normalizedUserId] as $seed) {
+                  $seed = trim((string) $seed);
+                  if ($seed !== '') {
+                    $keywords[$seed] = $seed;
+                  }
+                }
+
+                if ($normalizedEmail !== '' && str_contains($normalizedEmail, '@')) {
+                  $localPart = trim((string) strstr($normalizedEmail, '@', TRUE));
+                  if ($localPart !== '') {
+                    $keywords[$localPart] = $localPart;
+                  }
+                }
+
+                $candidates = [];
+                foreach (array_values($keywords) as $keyword) {
+                  try {
+                    $raw = $api->listByKeyword('person', $keyword, 200, 0);
+                    $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+                    $rows = $this->normalizeApiListPayload($parsed);
+                    foreach ($rows as $row) {
+                      if (!is_object($row)) {
+                        continue;
+                      }
+                      $uri = trim((string) ($row->uri ?? $row->hasURI ?? ''));
+                      if ($this->isUri($uri)) {
+                        $candidates[$uri] = $row;
+                      }
+                    }
+                  }
+                  catch (\Throwable $ignored) {
+                    // Try next keyword.
+                  }
+                }
+
+                if (empty($candidates)) {
+                  try {
+                    $raw = $api->listByKeyword('person', '_', 9999, 0);
+                    $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+                    $rows = $this->normalizeApiListPayload($parsed);
+                    foreach ($rows as $row) {
+                      if (!is_object($row)) {
+                        continue;
+                      }
+                      $uri = trim((string) ($row->uri ?? $row->hasURI ?? ''));
+                      if ($this->isUri($uri)) {
+                        $candidates[$uri] = $row;
+                      }
+                    }
+                  }
+                  catch (\Throwable $ignored) {
+                    return $resolved;
+                  }
+                }
+
+                foreach ($candidates as $candidate) {
+                  if (!is_object($candidate)) {
+                    continue;
+                  }
+
+                  $person = $candidate;
+                  if (!$this->personMatchesLinkedUser($person, $normalizedEmail, $normalizedUserName, $normalizedUserId)) {
+                    $hydrated = $this->hydratePersonForUserMatch($person);
+                    if (!$this->personMatchesLinkedUser($hydrated, $normalizedEmail, $normalizedUserName, $normalizedUserId)) {
+                      continue;
+                    }
+                    $person = $hydrated;
+                  }
+
+                  $affiliationUri = '';
+                  if (isset($person->hasAffiliation)) {
+                    $affiliationUri = $this->extractUriFromValue($person->hasAffiliation);
+                  }
+                  if ($affiliationUri === '' && isset($person->hasAffiliationUri) && is_string($person->hasAffiliationUri)) {
+                    $affiliationUri = trim((string) $person->hasAffiliationUri);
+                  }
+                  if (!$this->isUri($affiliationUri)) {
+                    continue;
+                  }
+
+                  $resolved['organizationUri'] = $affiliationUri;
+                  $resolved['organizationLabel'] = trim((string) (
+                    $person->hasAffiliation->label
+                    ?? $person->hasAffiliation->name
+                    ?? ''
+                  ));
+
+                  return $resolved;
+                }
+
+                return $resolved;
+              }
+
+              /**
+               * Match a Person payload with Drupal user identifiers.
+               */
+              protected function personMatchesLinkedUser(object $person, string $email, string $username, string $userId): bool {
+                $kgUserId = trim((string) ($person->userID ?? ''));
+                if ($kgUserId !== '' && $userId !== '' && $kgUserId === $userId) {
+                  return TRUE;
+                }
+
+                $emailCandidates = [
+                  $this->normalizeUserMatchEmail((string) ($person->userEmail ?? '')),
+                  $this->normalizeUserMatchEmail((string) ($person->mbox ?? '')),
+                  $this->normalizeUserMatchEmail((string) ($person->hasSIRManagerEmail ?? '')),
+                ];
+
+                foreach ($emailCandidates as $candidate) {
+                  if ($candidate !== '' && $email !== '' && $candidate === $email) {
+                    return TRUE;
+                  }
+                }
+
+                $kgUsername = trim((string) ($person->userName ?? ''));
+                return ($kgUsername !== '' && $username !== '' && strcasecmp($kgUsername, $username) === 0);
+              }
+
+              /**
+               * Normalize emails used to match linked users.
+               */
+              protected function normalizeUserMatchEmail(string $value): string {
+                $value = trim(strtolower($value));
+                if ($value === '') {
+                  return '';
+                }
+
+                if (str_starts_with($value, 'mailto:')) {
+                  $value = substr($value, 7);
+                }
+
+                return trim($value);
+              }
+
+              /**
+               * Hydrate sparse Person payload to include user linkage fields.
+               */
+              protected function hydratePersonForUserMatch(object $person): object {
+                $uri = trim((string) ($person->uri ?? $person->hasURI ?? ''));
+                if (!$this->isUri($uri) || !\Drupal::hasService('rep.api_connector')) {
+                  return $person;
+                }
+
+                try {
+                  $api = \Drupal::service('rep.api_connector');
+                  $raw = $api->getUri($uri);
+                  $full = $api->parseObjectResponse($raw, 'getUri');
+                  if (is_object($full)) {
+                    return $full;
+                  }
+                }
+                catch (\Throwable $ignored) {
+                  // Keep original payload.
+                }
+
+                return $person;
+              }
+
+  /**
+    * Resolve organization scope for filtering.
+    *
+    * Scope includes current organization plus ancestor/descendant organizations.
    *
    * @return array<int, string>
    */
@@ -4826,22 +5481,29 @@ class CttApiController extends ControllerBase {
       $api = \Drupal::service('rep.api_connector');
       $org = $api->parseObjectResponse($api->getUri($normalizedRoot), 'getUri');
 
-      if (is_object($org)) {
-        foreach (['parentOrganizationUri', 'hasParentOrganizationUri', 'parentOrganization', 'hasParentOrganization', 'isPartOf', 'partOf'] as $key) {
-          if (!isset($org->{$key})) {
-            continue;
-          }
+      // Expand scope downward (descendants) and upward (ancestors) via SPARQL.
+      if (method_exists($api, 'sparqlQuery')) {
+        $sparqlChildren = 'SELECT DISTINCT ?child WHERE {'
+          . ' ?child (<https://schema.org/isPartOf>)+ <' . $normalizedRoot . '> .'
+          . '}';
 
-          $parentUri = $this->extractUriFromValue($org->{$key});
-          if ($parentUri !== '' && $this->isUri($parentUri)) {
-            $scope[$parentUri] = TRUE;
+        $rawChildren = $api->sparqlQuery($sparqlChildren);
+        $childrenDecoded = json_decode((string) $rawChildren, TRUE);
+        $childrenBindings = $childrenDecoded['results']['bindings'] ?? [];
+        if (is_array($childrenBindings)) {
+          foreach ($childrenBindings as $binding) {
+            if (!is_array($binding)) {
+              continue;
+            }
+            $childUri = trim((string) ($binding['child']['value'] ?? ''));
+            if ($this->isUri($childUri)) {
+              $scope[$childUri] = TRUE;
+            }
           }
         }
-      }
 
-      if (method_exists($api, 'sparqlQuery')) {
         $sparqlParents = 'SELECT DISTINCT ?parent WHERE {'
-          . ' <' . $normalizedRoot . '> <https://schema.org/isPartOf> ?parent .'
+          . ' <' . $normalizedRoot . '> (<https://schema.org/isPartOf>)+ ?parent .'
           . '}';
 
         $rawParents = $api->sparqlQuery($sparqlParents);
@@ -4858,22 +5520,87 @@ class CttApiController extends ControllerBase {
             }
           }
         }
+      }
 
-        $sparqlChildren = 'SELECT DISTINCT ?child WHERE {'
-          . ' ?child <https://schema.org/isPartOf> <' . $normalizedRoot . '> .'
-          . '}';
+      // Fallback/augmentation based on explicit parent fields from organization payloads.
+      $organizations = [];
+      $pageSize = 200;
+      $maxPages = 15;
+      for ($page = 0; $page < $maxPages; $page++) {
+        $offset = $page * $pageSize;
+        $raw = $api->listByKeyword('organization', '_', $pageSize, $offset);
+        $parsed = $api->parseObjectResponse($raw, 'listByKeyword');
+        $chunk = $this->normalizeApiListPayload($parsed);
+        if (empty($chunk)) {
+          break;
+        }
+        foreach ($chunk as $entry) {
+          if (is_object($entry)) {
+            $organizations[] = $entry;
+          }
+        }
+        if (count($chunk) < $pageSize) {
+          break;
+        }
+      }
 
-        $rawChildren = $api->sparqlQuery($sparqlChildren);
-        $childrenDecoded = json_decode((string) $rawChildren, TRUE);
-        $childrenBindings = $childrenDecoded['results']['bindings'] ?? [];
-        if (is_array($childrenBindings)) {
-          foreach ($childrenBindings as $binding) {
-            if (!is_array($binding)) {
-              continue;
+      if (!empty($organizations)) {
+        $parentByChild = [];
+        foreach ($organizations as $entry) {
+          $childUri = trim((string) ($entry->uri ?? $entry->hasURI ?? ''));
+          if (!$this->isUri($childUri)) {
+            continue;
+          }
+
+          $parentUri = '';
+          foreach (['parentOrganizationUri', 'hasParentOrganizationUri', 'partOfUri'] as $key) {
+            if (isset($entry->{$key}) && is_string($entry->{$key})) {
+              $candidate = trim((string) $entry->{$key});
+              if ($this->isUri($candidate)) {
+                $parentUri = $candidate;
+                break;
+              }
             }
-            $childUri = trim((string) ($binding['child']['value'] ?? ''));
-            if ($this->isUri($childUri)) {
+          }
+          if ($parentUri === '') {
+            foreach (['parentOrganization', 'hasParentOrganization', 'partOf', 'isPartOf'] as $key) {
+              if (!isset($entry->{$key})) {
+                continue;
+              }
+              $candidate = $this->extractUriFromValue($entry->{$key});
+              if ($this->isUri($candidate)) {
+                $parentUri = $candidate;
+                break;
+              }
+            }
+          }
+
+          if ($this->isUri($parentUri)) {
+            $parentByChild[$childUri] = $parentUri;
+          }
+        }
+
+        // Upward closure.
+        $added = TRUE;
+        while ($added) {
+          $added = FALSE;
+          foreach (array_keys($scope) as $candidateUri) {
+            $parentUri = trim((string) ($parentByChild[$candidateUri] ?? ''));
+            if ($this->isUri($parentUri) && !isset($scope[$parentUri])) {
+              $scope[$parentUri] = TRUE;
+              $added = TRUE;
+            }
+          }
+        }
+
+        // Downward closure.
+        $added = TRUE;
+        while ($added) {
+          $added = FALSE;
+          foreach ($parentByChild as $childUri => $parentUri) {
+            if (isset($scope[$parentUri]) && !isset($scope[$childUri])) {
               $scope[$childUri] = TRUE;
+              $added = TRUE;
             }
           }
         }
@@ -4941,7 +5668,9 @@ class CttApiController extends ControllerBase {
           }
 
           $partOfKey = $this->normalizeUriKey($partOfUri);
-          if ($partOfKey === '' || !isset($scopeKeys[$partOfKey])) {
+          $partOfMatchesScope = ($partOfKey !== '' && isset($scopeKeys[$partOfKey]));
+
+          if (!$partOfMatchesScope) {
             continue;
           }
 
@@ -5276,7 +6005,16 @@ class CttApiController extends ControllerBase {
       }
 
       $scopeUris = [];
-      $rawScopeUris = $request->query->all('organizationScopeUris');
+      // Symfony can throw when organizationScopeUris is provided as a scalar
+      // instead of array, so normalize both shapes safely.
+      $rawScopeUris = NULL;
+      try {
+        $rawScopeUris = $request->query->all('organizationScopeUris');
+      }
+      catch (\Throwable $ignored) {
+        $rawScopeUris = NULL;
+      }
+
       if (is_array($rawScopeUris)) {
         foreach ($rawScopeUris as $candidate) {
           if (!is_scalar($candidate)) {

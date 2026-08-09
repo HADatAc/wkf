@@ -881,6 +881,51 @@
       return modalRoot.querySelector('[class*="w-1/3"]');
     }
 
+    function ensureModalActionButtonsVisible() {
+      var heading = document.querySelector('h2[data-ctt-renamed-select-instrument="1"]');
+      if (!heading) {
+        return;
+      }
+
+      var overlay = heading.closest('[class*="fixed"]');
+      if (!overlay) {
+        return;
+      }
+
+      // Keep the dialog fully usable on short viewports/zoomed layouts.
+      overlay.style.alignItems = 'center';
+      overlay.style.overflowY = 'auto';
+      overlay.style.padding = '16px';
+
+      var dialog = heading.closest('[class*="bg-white"], [class*="rounded"], [role="dialog"]');
+      if (dialog && dialog.style) {
+        dialog.style.maxHeight = 'calc(100vh - 32px)';
+        dialog.style.overflow = 'auto';
+      }
+
+      var buttons = Array.prototype.slice.call((dialog || overlay).querySelectorAll('button'));
+      var actionButtons = buttons.filter(function (button) {
+        var text = String(button.textContent || '').trim().toLowerCase();
+        return text === 'confirm' || text === 'cancel' || text === 'assign' || text === 'save';
+      });
+
+      if (!actionButtons.length) {
+        return;
+      }
+
+      var footer = actionButtons[0].closest('div');
+      if (!footer || !footer.style) {
+        return;
+      }
+
+      // Pin action row while preserving existing layout.
+      footer.style.position = 'sticky';
+      footer.style.bottom = '0';
+      footer.style.zIndex = '4';
+      footer.style.background = '#fff';
+      footer.style.paddingTop = '8px';
+    }
+
     function resolveInstrumentCards() {
       var leftPanel = resolveModalLeftPanel();
       if (!leftPanel || !leftPanel.querySelectorAll) {
@@ -1142,6 +1187,7 @@
       renameModalHeadingAndSummary();
       ensurePlatformFilterControl();
       applyPlatformFilterToRenderedList();
+      ensureModalActionButtonsVisible();
     }
 
     if (typeof MutationObserver === 'function' && document && document.body) {
@@ -1245,6 +1291,530 @@
     };
 
     window.__cttInstrumentSelectionBridgeInstalled = true;
+  }
+
+  function installEditModeSimulatorAssignmentBridge(container, settings) {
+    if (!container || container.__cttEditModeSimulatorBridgeInstalled) {
+      return;
+    }
+    if (isExecutionView(settings) || toBooleanFlag(settings.readOnlyPreview)) {
+      return;
+    }
+
+    container.__cttEditModeSimulatorBridgeInstalled = true;
+
+    var apiBaseUrl = String(settings && settings.apiBaseUrl || '').trim().replace(/\/+$/, '');
+    var processUri = String(settings && settings.processUri || '').trim();
+    var studyUri = String(settings && settings.studyUri || '').trim();
+    var assignmentByTask = {};
+    var authoritativeMetadata = null;
+    var metadataLoading = false;
+    var activeModal = null;
+
+    if (!apiBaseUrl || !processUri || typeof window.fetch !== 'function') {
+      return;
+    }
+
+    function ensureStyles() {
+      if (document.getElementById('ctt-assign-simulator-style')) {
+        return;
+      }
+
+      var style = document.createElement('style');
+      style.id = 'ctt-assign-simulator-style';
+      style.textContent = ''
+        + '.ctt-assign-simulator-btn{margin-left:8px;}'
+        + '.ctt-sim-chip{display:block;margin-top:4px;padding:2px 6px;border-radius:10px;background:#e8f5e9;color:#1b5e20;font-size:10px;line-height:1.2;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
+        + '.ctt-sim-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10050;display:flex;align-items:center;justify-content:center;padding:16px;}'
+        + '.ctt-sim-modal{width:min(720px,95vw);background:#fff;border-radius:10px;box-shadow:0 16px 40px rgba(0,0,0,.25);padding:16px;}'
+        + '.ctt-sim-modal h3{margin:0 0 10px 0;font-size:18px;}'
+        + '.ctt-sim-modal .ctt-sim-grid{display:grid;grid-template-columns:1fr;gap:12px;}'
+        + '.ctt-sim-modal label{display:block;font-size:12px;font-weight:600;margin-bottom:4px;}'
+        + '.ctt-sim-modal select{width:100%;padding:8px;border:1px solid #cfd8dc;border-radius:6px;background:#fff;}'
+        + '.ctt-sim-modal .ctt-sim-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px;}'
+        + '.ctt-sim-modal .ctt-sim-status{font-size:12px;color:#455a64;min-height:18px;}'
+        + '.ctt-sim-modal .ctt-sim-summary{margin-top:8px;padding:8px;border-radius:6px;background:#f5f7f8;font-size:12px;color:#37474f;}';
+      document.head.appendChild(style);
+    }
+
+    function isVisibleElement(element) {
+      if (!element) {
+        return false;
+      }
+      return !!(element.offsetParent || element.getClientRects().length);
+    }
+
+    function getMergedMetadata() {
+      var visual = parseTaskNodeMetadata(container);
+      return mergeTaskMetadata(visual, authoritativeMetadata || { byUri: {}, byLabel: {}, childrenByParent: {}, parentByChild: {} });
+    }
+
+    function loadAuthoritativeMetadata() {
+      if (metadataLoading || authoritativeMetadata) {
+        return;
+      }
+
+      metadataLoading = true;
+      var endpoint = apiBaseUrl + '/process/tree?uri=' + encodeURIComponent(processUri);
+      window.fetch(endpoint, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      }).then(function (response) {
+        if (!response || !response.ok) {
+          throw new Error('Failed to load process tree');
+        }
+        return response.json();
+      }).then(function (payload) {
+        authoritativeMetadata = parseAuthoritativeTaskMetadata(payload);
+        refreshActionBarButton();
+      }).catch(function () {
+        authoritativeMetadata = null;
+      }).finally(function () {
+        metadataLoading = false;
+      });
+    }
+
+    function loadAssignments() {
+      var endpoint = apiBaseUrl + '/task/simulator-assignment?processUri=' + encodeURIComponent(processUri);
+      return window.fetch(endpoint, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      }).then(function (response) {
+        if (!response || !response.ok) {
+          return null;
+        }
+        return response.json().catch(function () { return null; });
+      }).then(function (payload) {
+        assignmentByTask = {};
+        if (!payload || payload.ok !== true || !Array.isArray(payload.assignments)) {
+          return;
+        }
+
+        payload.assignments.forEach(function (row) {
+          if (!row || typeof row !== 'object') {
+            return;
+          }
+          var taskUri = normalizeTaskUri(row.taskUri || '');
+          if (!taskUri) {
+            return;
+          }
+          assignmentByTask[taskUri] = row;
+        });
+      }).finally(function () {
+        renderTaskAssignmentBadges();
+        refreshActionBarButton();
+      });
+    }
+
+    function findSelectedTaskNode() {
+      return container.querySelector(
+        '.react-flow__node.selected[data-id], '
+        + '.react-flow__node[aria-selected="true"][data-id], '
+        + '[class*="react-flow__node"].selected[data-id], '
+        + '[class*="react-flow__node"][aria-selected="true"][data-id], '
+        + '[data-ctt-current-task-node="1"][data-id]'
+      );
+    }
+
+    function getSelectedTaskUriAndType() {
+      var merged = getMergedMetadata();
+      var selectedUri = getSelectedCanvasTaskUri(container, merged);
+      var taskType = '';
+
+      if (selectedUri && merged.byUri && merged.byUri[selectedUri]) {
+        taskType = String(merged.byUri[selectedUri].taskType || '').trim().toLowerCase();
+      }
+
+      if (!selectedUri) {
+        var node = findSelectedTaskNode();
+        if (node) {
+          selectedUri = normalizeTaskUri(node.getAttribute('data-id') || '');
+          if (!taskType) {
+            var inferred = inferTaskMetaFromLabel(node.textContent || '');
+            taskType = String(inferred.taskType || '').trim().toLowerCase();
+          }
+        }
+      }
+
+      return {
+        taskUri: selectedUri,
+        taskType: taskType,
+      };
+    }
+
+    function isEligibleTaskType(taskType) {
+      var normalized = String(taskType || '').trim().toLowerCase();
+      return normalized === 'automated' || normalized === 'interactive';
+    }
+
+    function findActionBarHost() {
+      var controls = container.querySelectorAll('button, [role="button"], a[role="button"], a');
+      for (var i = 0; i < controls.length; i += 1) {
+        var control = controls[i];
+        if (!isVisibleElement(control)) {
+          continue;
+        }
+        var label = normalizeControlText(control);
+        if (!/(assign instrument|edit instrument|new task|new subtask|delete|remove|change parent|set root|auto order tasks)/.test(label)) {
+          continue;
+        }
+
+        var host = control.closest('div');
+        var depth = 0;
+        while (host && depth < 5) {
+          var buttonCount = host.querySelectorAll ? host.querySelectorAll('button, [role="button"], a[role="button"], a').length : 0;
+          if (buttonCount >= 2) {
+            return host;
+          }
+          host = host.parentElement;
+          depth += 1;
+        }
+      }
+      return null;
+    }
+
+    function buildAssignmentSummary(row) {
+      if (!row || typeof row !== 'object') {
+        return '';
+      }
+      var platform = String(row.platformInstanceLabel || row.platformInstanceUri || '').trim();
+      var instrument = String(row.instrumentInstanceLabel || row.instrumentInstanceUri || '').trim();
+      var component = String(row.componentInstanceLabel || row.componentInstanceUri || '').trim();
+      if (!platform && !instrument && !component) {
+        return '';
+      }
+      return [platform, instrument, component].filter(Boolean).join(' | ');
+    }
+
+    function renderTaskAssignmentBadges() {
+      var nodes = container.querySelectorAll('.react-flow__node[data-id], [class*="react-flow__node"][data-id]');
+      nodes.forEach(function (node) {
+        var taskUri = normalizeTaskUri(node.getAttribute('data-id') || '');
+        var existing = node.querySelector('[data-ctt-sim-chip="1"]');
+        if (existing) {
+          existing.remove();
+        }
+
+        if (!taskUri || !assignmentByTask[taskUri]) {
+          return;
+        }
+
+        var summary = buildAssignmentSummary(assignmentByTask[taskUri]);
+        if (!summary) {
+          return;
+        }
+
+        if (node.style.position === '') {
+          node.style.position = 'relative';
+        }
+
+        var chip = document.createElement('div');
+        chip.className = 'ctt-sim-chip';
+        chip.setAttribute('data-ctt-sim-chip', '1');
+        chip.setAttribute('title', summary);
+        chip.textContent = 'Simulator: ' + summary;
+        node.appendChild(chip);
+      });
+    }
+
+    function closeAssignModal() {
+      if (activeModal && activeModal.parentNode) {
+        activeModal.parentNode.removeChild(activeModal);
+      }
+      activeModal = null;
+    }
+
+    function openAssignModal(taskUri) {
+      closeAssignModal();
+      ensureStyles();
+
+      var endpoint = apiBaseUrl + '/simulator-assignment/options'
+        + '?studyUri=' + encodeURIComponent(studyUri)
+        + '&processUri=' + encodeURIComponent(processUri)
+        + '&taskUri=' + encodeURIComponent(taskUri);
+
+      var backdrop = document.createElement('div');
+      backdrop.className = 'ctt-sim-modal-backdrop';
+      backdrop.innerHTML = ''
+        + '<div class="ctt-sim-modal" role="dialog" aria-modal="true" aria-label="Assign Simulator">'
+        + '  <h3>Assign Simulator</h3>'
+        + '  <div class="ctt-sim-grid">'
+        + '    <div><label>Platform Instance</label><select data-ctt-sim-platform><option value="">Loading...</option></select></div>'
+        + '    <div><label>Instrument Instance</label><select data-ctt-sim-instrument disabled="disabled"><option value="">Select a platform instance first</option></select></div>'
+        + '    <div><label>Component Instance</label><select data-ctt-sim-component disabled="disabled"><option value="">Select an instrument instance first</option></select></div>'
+        + '  </div>'
+        + '  <div class="ctt-sim-summary" data-ctt-sim-summary>Choose a platform, instrument, and component instance.</div>'
+        + '  <div class="ctt-sim-status" data-ctt-sim-status></div>'
+        + '  <div class="ctt-sim-actions">'
+        + '    <button type="button" class="btn btn-sm btn-secondary" data-ctt-sim-cancel>Cancel</button>'
+        + '    <button type="button" class="btn btn-sm btn-primary" data-ctt-sim-confirm disabled="disabled">Confirm</button>'
+        + '  </div>'
+        + '</div>';
+
+      document.body.appendChild(backdrop);
+      activeModal = backdrop;
+
+      var platformSelect = backdrop.querySelector('[data-ctt-sim-platform]');
+      var instrumentSelect = backdrop.querySelector('[data-ctt-sim-instrument]');
+      var componentSelect = backdrop.querySelector('[data-ctt-sim-component]');
+      var statusNode = backdrop.querySelector('[data-ctt-sim-status]');
+      var summaryNode = backdrop.querySelector('[data-ctt-sim-summary]');
+      var cancelBtn = backdrop.querySelector('[data-ctt-sim-cancel]');
+      var confirmBtn = backdrop.querySelector('[data-ctt-sim-confirm]');
+
+      var optionsPayload = null;
+
+      function setStatus(message) {
+        if (statusNode) {
+          statusNode.textContent = String(message || '');
+        }
+      }
+
+      function setSummary(message) {
+        if (summaryNode) {
+          summaryNode.textContent = String(message || '');
+        }
+      }
+
+      function optionHtml(value, label, selected) {
+        return '<option value="' + escapeHtml(value) + '"' + (selected ? ' selected="selected"' : '') + '>' + escapeHtml(label) + '</option>';
+      }
+
+      function getDefaultSelection() {
+        var fromOptions = optionsPayload && optionsPayload.assignment && typeof optionsPayload.assignment === 'object'
+          ? optionsPayload.assignment
+          : null;
+        var fromCache = assignmentByTask[taskUri] || null;
+        return fromOptions || fromCache || null;
+      }
+
+      function filterInstrumentOptions(platformUri) {
+        if (!optionsPayload || !Array.isArray(optionsPayload.instrumentInstances)) {
+          return [];
+        }
+        return optionsPayload.instrumentInstances.filter(function (row) {
+          return String(row.platformInstanceUri || '') === String(platformUri || '');
+        });
+      }
+
+      function filterComponentOptions(instrumentInstanceUri) {
+        if (!optionsPayload || !Array.isArray(optionsPayload.componentInstances)) {
+          return [];
+        }
+        return optionsPayload.componentInstances.filter(function (row) {
+          return String(row.instrumentInstanceUri || '') === String(instrumentInstanceUri || '');
+        });
+      }
+
+      function refreshConfirmState() {
+        var ready = !!(platformSelect && platformSelect.value && instrumentSelect && instrumentSelect.value && componentSelect && componentSelect.value);
+        if (confirmBtn) {
+          confirmBtn.disabled = !ready;
+        }
+
+        if (!ready) {
+          setSummary('Choose a platform, instrument, and component instance.');
+          return;
+        }
+
+        var platformLabel = platformSelect.options[platformSelect.selectedIndex] ? platformSelect.options[platformSelect.selectedIndex].text : '';
+        var instrumentLabel = instrumentSelect.options[instrumentSelect.selectedIndex] ? instrumentSelect.options[instrumentSelect.selectedIndex].text : '';
+        var componentLabel = componentSelect.options[componentSelect.selectedIndex] ? componentSelect.options[componentSelect.selectedIndex].text : '';
+        setSummary('Selected mapping: ' + platformLabel + ' | ' + instrumentLabel + ' | ' + componentLabel);
+      }
+
+      function fillComponentSelect(defaultComponentUri) {
+        if (!instrumentSelect || !componentSelect) {
+          return;
+        }
+        var rows = filterComponentOptions(instrumentSelect.value);
+        componentSelect.disabled = rows.length === 0;
+        var html = optionHtml('', rows.length ? 'Select component instance' : 'No component instances for selected instrument', !defaultComponentUri);
+        rows.forEach(function (row) {
+          var uri = String(row.uri || '');
+          var label = String(row.label || uri);
+          html += optionHtml(uri, label, defaultComponentUri && uri === defaultComponentUri);
+        });
+        componentSelect.innerHTML = html;
+        refreshConfirmState();
+      }
+
+      function fillInstrumentSelect(defaultInstrumentUri, defaultComponentUri) {
+        if (!platformSelect || !instrumentSelect) {
+          return;
+        }
+        var rows = filterInstrumentOptions(platformSelect.value);
+        instrumentSelect.disabled = rows.length === 0;
+        var html = optionHtml('', rows.length ? 'Select instrument instance' : 'No instrument instances for selected platform', !defaultInstrumentUri);
+        rows.forEach(function (row) {
+          var uri = String(row.uri || '');
+          var label = String(row.label || uri);
+          html += optionHtml(uri, label, defaultInstrumentUri && uri === defaultInstrumentUri);
+        });
+        instrumentSelect.innerHTML = html;
+        fillComponentSelect(defaultComponentUri);
+      }
+
+      function fillPlatformSelect(defaultPlatformUri, defaultInstrumentUri, defaultComponentUri) {
+        var rows = optionsPayload && Array.isArray(optionsPayload.platformInstances) ? optionsPayload.platformInstances : [];
+        platformSelect.disabled = rows.length === 0;
+        var html = optionHtml('', rows.length ? 'Select platform instance' : 'No platform instances available', !defaultPlatformUri);
+        rows.forEach(function (row) {
+          var uri = String(row.uri || '');
+          var label = String(row.label || uri);
+          html += optionHtml(uri, label, defaultPlatformUri && uri === defaultPlatformUri);
+        });
+        platformSelect.innerHTML = html;
+        fillInstrumentSelect(defaultInstrumentUri, defaultComponentUri);
+      }
+
+      platformSelect.addEventListener('change', function () {
+        fillInstrumentSelect('', '');
+      });
+
+      instrumentSelect.addEventListener('change', function () {
+        fillComponentSelect('');
+      });
+
+      componentSelect.addEventListener('change', function () {
+        refreshConfirmState();
+      });
+
+      cancelBtn.addEventListener('click', function () {
+        closeAssignModal();
+      });
+
+      backdrop.addEventListener('click', function (event) {
+        if (event.target === backdrop) {
+          closeAssignModal();
+        }
+      });
+
+      confirmBtn.addEventListener('click', function () {
+        if (confirmBtn.disabled) {
+          return;
+        }
+
+        confirmBtn.disabled = true;
+        setStatus('Saving simulator mapping...');
+
+        var payload = {
+          platformInstanceUri: String(platformSelect.value || '').trim(),
+          instrumentInstanceUri: String(instrumentSelect.value || '').trim(),
+          componentInstanceUri: String(componentSelect.value || '').trim(),
+        };
+
+        window.fetch(apiBaseUrl + '/task/simulator-assignment?uri=' + encodeURIComponent(taskUri), {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        }).then(function (response) {
+          return response.json().catch(function () {
+            return { ok: false, error: 'Unexpected server response' };
+          });
+        }).then(function (result) {
+          if (!result || result.ok !== true || !result.assignment) {
+            throw new Error(String(result && result.error || 'Unable to save mapping'));
+          }
+
+          assignmentByTask[taskUri] = result.assignment;
+          renderTaskAssignmentBadges();
+          refreshActionBarButton();
+          closeAssignModal();
+        }).catch(function (error) {
+          setStatus(String(error && error.message || error || 'Unable to save mapping'));
+          refreshConfirmState();
+        });
+      });
+
+      setStatus('Loading simulator options...');
+      window.fetch(endpoint, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      }).then(function (response) {
+        if (!response || !response.ok) {
+          throw new Error('Failed to load options');
+        }
+        return response.json();
+      }).then(function (responsePayload) {
+        if (!responsePayload || responsePayload.ok !== true || !responsePayload.payload) {
+          throw new Error(String(responsePayload && responsePayload.error || 'Invalid options payload'));
+        }
+        optionsPayload = responsePayload.payload;
+
+        var defaults = getDefaultSelection();
+        var defaultPlatformUri = defaults ? String(defaults.platformInstanceUri || '') : '';
+        var defaultInstrumentUri = defaults ? String(defaults.instrumentInstanceUri || '') : '';
+        var defaultComponentUri = defaults ? String(defaults.componentInstanceUri || '') : '';
+        fillPlatformSelect(defaultPlatformUri, defaultInstrumentUri, defaultComponentUri);
+        setStatus('');
+      }).catch(function (error) {
+        setStatus(String(error && error.message || error || 'Unable to load options'));
+      });
+    }
+
+    function refreshActionBarButton() {
+      var host = findActionBarHost();
+      if (!host) {
+        return;
+      }
+
+      var button = host.querySelector('[data-ctt-assign-simulator="1"]');
+      if (!button) {
+        button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-sm btn-outline-primary ctt-assign-simulator-btn';
+        button.setAttribute('data-ctt-assign-simulator', '1');
+        button.textContent = 'Assign Simulator';
+        host.appendChild(button);
+
+        button.addEventListener('click', function () {
+          var info = getSelectedTaskUriAndType();
+          if (!info.taskUri || !isEligibleTaskType(info.taskType)) {
+            return;
+          }
+          openAssignModal(info.taskUri);
+        });
+      }
+
+      var info = getSelectedTaskUriAndType();
+      var eligible = !!(info.taskUri && isEligibleTaskType(info.taskType));
+
+      button.style.display = eligible ? '' : 'none';
+      button.disabled = !eligible;
+      button.setAttribute('data-ctt-task-uri', info.taskUri || '');
+
+      if (eligible && assignmentByTask[info.taskUri]) {
+        button.setAttribute('title', buildAssignmentSummary(assignmentByTask[info.taskUri]));
+      }
+      else {
+        button.removeAttribute('title');
+      }
+    }
+
+    var observer = new MutationObserver(function () {
+      refreshActionBarButton();
+      renderTaskAssignmentBadges();
+    });
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'aria-selected', 'data-id'],
+    });
+
+    ensureStyles();
+    loadAuthoritativeMetadata();
+    loadAssignments();
+    refreshActionBarButton();
+    renderTaskAssignmentBadges();
   }
 
   function escapeHtml(value) {
@@ -4688,6 +5258,7 @@
         installSubmissionStatusBridge(settings);
         installExecutionSaveTraceBridge(settings);
         installInstrumentSelectionContextBridge(settings);
+        installEditModeSimulatorAssignmentBridge(container, settings);
         installSpecialExecutionMode(container, settings);
         enforceCanvasModeSplit(container, settings);
 

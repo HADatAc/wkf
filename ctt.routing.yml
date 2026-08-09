@@ -267,6 +267,36 @@ ctt.api.task.instruments_query:
   options:
     no_cache: TRUE
 
+ctt.api.task.simulator_assignment_get:
+  path: '/workflow/api/task/simulator-assignment'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getTaskSimulatorAssignment'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
+ctt.api.task.simulator_assignment_put:
+  path: '/workflow/api/task/simulator-assignment'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::setTaskSimulatorAssignment'
+  requirements:
+    _permission: 'edit ctt workflow'
+  methods: [PUT]
+  options:
+    no_cache: TRUE
+
+ctt.api.simulator_assignment_options:
+  path: '/workflow/api/simulator-assignment/options'
+  defaults:
+    _controller: '\Drupal\ctt\Controller\CttApiController::getSimulatorAssignmentOptions'
+  requirements:
+    _permission: 'access ctt editor'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+
 # Instrument routes
 ctt.api.instrument.list:
   path: '/workflow/api/instrument/list'
