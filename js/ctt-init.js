@@ -3978,7 +3978,7 @@
     var controls = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
     controls.forEach(function (control) {
       var label = normalizeControlText(control);
-      var isEditingControl = /\b(save to api|save|tasks palette|task palette|create sub-?task|new sub-?task|new task|add child|add subtask|assign instrument|edit instrument|delete|remove|change parent|set root|auto order)\b/.test(label);
+      var isEditingControl = /\b(save to api|save|tasks palette|task palette|create sub-?task|new sub-?task|new task|add child|add subtask|assign instrument|assign component instance|edit instrument|edit component instance|delete|remove|change parent|set root|auto order)\b/.test(label);
       if (!isEditingControl) {
         return;
       }

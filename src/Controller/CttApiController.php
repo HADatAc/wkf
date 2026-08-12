@@ -3672,12 +3672,23 @@ class CttApiController extends ControllerBase {
       $resolvedUri = $this->resolveExistingProcessUriVariant($requestedUri);
       $lookupUri = $this->isUri($resolvedUri) ? $resolvedUri : $requestedUri;
 
-      $result = $this->hascoClient->getByUri($lookupUri);
+      $result = $this->getByUriWithTransientRetry($lookupUri, 3);
       if (is_array($result) && !empty($result['error']) && $lookupUri !== $requestedUri) {
-        $fallback = $this->hascoClient->getByUri($requestedUri);
+        $fallback = $this->getByUriWithTransientRetry($requestedUri, 3);
         if (!(is_array($fallback) && !empty($fallback['error']))) {
           $result = $fallback;
           $lookupUri = $requestedUri;
+        }
+      }
+
+      if (is_array($result) && !empty($result['error'])) {
+        $details = trim((string) $result['error']);
+        if ($this->isTransientHascoLookupError($details)) {
+          return new JsonResponse([
+            'error' => 'HASCOAPI backend is temporarily unavailable while loading workflow process.',
+            'details' => $details,
+            'requestedUri' => (string) $requestedUri,
+          ], 503);
         }
       }
 
@@ -3687,7 +3698,7 @@ class CttApiController extends ControllerBase {
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
-      return new JsonResponse(['error' => $e->getMessage()], 404);
+      return new JsonResponse(['error' => $e->getMessage()], 500);
     }
   }
 
@@ -3922,9 +3933,9 @@ class CttApiController extends ControllerBase {
       $resolvedUri = $this->resolveExistingProcessUriVariant($uri);
       $lookupUri = $this->isUri($resolvedUri) ? $resolvedUri : $uri;
 
-      $process = $this->hascoClient->getByUri($lookupUri);
+      $process = $this->getByUriWithTransientRetry($lookupUri, 3);
       if (is_array($process) && !empty($process['error']) && $lookupUri !== $uri) {
-        $fallback = $this->hascoClient->getByUri($uri);
+        $fallback = $this->getByUriWithTransientRetry($uri, 3);
         if (!(is_array($fallback) && !empty($fallback['error']))) {
           $process = $fallback;
           $lookupUri = $uri;
@@ -3932,9 +3943,40 @@ class CttApiController extends ControllerBase {
       }
 
       if (is_array($process) && !empty($process['error'])) {
+        $details = (string) $process['error'];
+        if ($this->isTransientHascoLookupError($details)) {
+          $cached = $this->getCachedProcessTreePayload($uri, 900);
+          if (is_array($cached)) {
+            $cached['_stale'] = TRUE;
+            $cached['_staleReason'] = 'transient_backend_unavailable';
+            return new JsonResponse($cached, 200);
+          }
+
+          return new JsonResponse([
+            'error' => 'HASCOAPI backend is temporarily unavailable while loading workflow process.',
+            'details' => $details,
+            'requestedUri' => $uri,
+          ], 503);
+        }
+
+        if (!$this->isExplicitNotFoundHascoLookupError($details)) {
+          $cached = $this->getCachedProcessTreePayload($uri, 900);
+          if (is_array($cached)) {
+            $cached['_stale'] = TRUE;
+            $cached['_staleReason'] = 'unexpected_backend_error';
+            return new JsonResponse($cached, 200);
+          }
+
+          return new JsonResponse([
+            'error' => 'HASCOAPI backend returned an unexpected error while loading workflow process.',
+            'details' => $details,
+            'requestedUri' => $uri,
+          ], 503);
+        }
+
         return new JsonResponse([
           'error' => 'Workflow process was not found in HASCOAPI.',
-          'details' => (string) $process['error'],
+          'details' => $details,
           'requestedUri' => $uri,
         ], 404);
       }
@@ -3954,14 +3996,189 @@ class CttApiController extends ControllerBase {
         $this->cacheTaskProcessMappings($tasks, $normalizedProcessUri);
       }
 
-      return new JsonResponse([
+      $payload = [
         'process' => $process,
         'tasks' => $tasks,
-      ]);
+      ];
+      $this->cacheProcessTreePayload($uri, $payload);
+
+      return new JsonResponse($payload);
     }
     catch (\Exception $e) {
       return new JsonResponse(['error' => $e->getMessage()], 500);
     }
+  }
+
+  /**
+   * Resolve a URI with bounded retries for transient HASCO lookup failures.
+   */
+  protected function getByUriWithTransientRetry(string $uri, int $maxAttempts = 3): mixed {
+    $attempt = 0;
+    $result = NULL;
+
+    while ($attempt < $maxAttempts) {
+      $attempt++;
+      $result = $this->hascoClient->getByUri($uri);
+
+      if (!is_array($result) || empty($result['error'])) {
+        return $result;
+      }
+
+      $detail = trim((string) $result['error']);
+      if (!$this->isTransientHascoLookupError($detail) || $attempt >= $maxAttempts) {
+        return $result;
+      }
+
+      // Small bounded backoff to ride out brief triplestore/API blips.
+      usleep(200000 * $attempt);
+    }
+
+    return $result;
+  }
+
+  /**
+   * Detect transient HASCO/triplestore lookup errors.
+   */
+  protected function isTransientHascoLookupError(string $detail): bool {
+    $d = strtolower(trim($detail));
+    if ($d === '') {
+      return FALSE;
+    }
+
+    return (
+      strpos($d, 'triplestore_unavailable') !== FALSE
+      || strpos($d, 'triplestore is unavailable') !== FALSE
+      || strpos($d, 'status code: 503') !== FALSE
+      || strpos($d, '"status":503') !== FALSE
+      || strpos($d, 'service unavailable') !== FALSE
+      || strpos($d, 'gateway timeout') !== FALSE
+      || strpos($d, 'connection refused') !== FALSE
+      || strpos($d, 'timed out') !== FALSE
+    );
+  }
+
+  /**
+   * Detect explicit not-found lookup errors from HASCO payloads.
+   */
+  protected function isExplicitNotFoundHascoLookupError(string $detail): bool {
+    $d = strtolower(trim($detail));
+    if ($d === '') {
+      return FALSE;
+    }
+
+    return (
+      strpos($d, 'not found') !== FALSE
+      || strpos($d, 'status code: 404') !== FALSE
+      || strpos($d, '"status":404') !== FALSE
+      || strpos($d, '404') === 0
+    );
+  }
+
+  /**
+   * Retry arbitrary HASCO read calls when backend outage appears transient.
+   */
+  protected function callWithTransientRetry(callable $operation, int $maxAttempts = 3): mixed {
+    $attempt = 0;
+    $result = NULL;
+
+    while ($attempt < $maxAttempts) {
+      $attempt++;
+      $result = $operation();
+
+      $details = $this->extractResultErrorText($result);
+      if ($details === '' || !$this->isTransientHascoLookupError($details) || $attempt >= $maxAttempts) {
+        return $result;
+      }
+
+      usleep(200000 * $attempt);
+    }
+
+    return $result;
+  }
+
+  /**
+   * Extract best-effort error detail from mixed HASCO payloads.
+   */
+  protected function extractResultErrorText(mixed $result): string {
+    if (is_array($result)) {
+      if (!empty($result['error']) && is_string($result['error'])) {
+        return trim((string) $result['error']);
+      }
+      if (!empty($result['message']) && is_string($result['message'])) {
+        return trim((string) $result['message']);
+      }
+      if (!empty($result['body']) && is_string($result['body'])) {
+        return trim((string) $result['body']);
+      }
+      if (isset($result['error']) && is_array($result['error']) && !empty($result['error']['message']) && is_string($result['error']['message'])) {
+        return trim((string) $result['error']['message']);
+      }
+      return '';
+    }
+
+    if (is_object($result)) {
+      if (isset($result->error) && is_string($result->error) && trim($result->error) !== '') {
+        return trim((string) $result->error);
+      }
+      if (isset($result->message) && is_string($result->message) && trim($result->message) !== '') {
+        return trim((string) $result->message);
+      }
+      return '';
+    }
+
+    if (is_string($result)) {
+      return trim($result);
+    }
+
+    return '';
+  }
+
+  /**
+   * Build stable key for process-tree response cache.
+   */
+  protected function processTreeCacheKey(string $processUri): string {
+    $keySeed = $this->normalizeUriKey($processUri);
+    return 'ctt.process_tree_cache.' . sha1($keySeed !== '' ? $keySeed : trim($processUri));
+  }
+
+  /**
+   * Cache process tree payload for transient-outage fallback.
+   */
+  protected function cacheProcessTreePayload(string $processUri, array $payload): void {
+    if (!$this->isUri(trim($processUri)) || empty($payload['process'])) {
+      return;
+    }
+
+    \Drupal::state()->set($this->processTreeCacheKey($processUri), [
+      'cached_at' => time(),
+      'payload' => $payload,
+    ]);
+  }
+
+  /**
+   * Read cached process tree payload if it is still fresh.
+   */
+  protected function getCachedProcessTreePayload(string $processUri, int $ttlSeconds = 900): ?array {
+    if (!$this->isUri(trim($processUri))) {
+      return NULL;
+    }
+
+    $cached = \Drupal::state()->get($this->processTreeCacheKey($processUri), NULL);
+    if (!is_array($cached)) {
+      return NULL;
+    }
+
+    $cachedAt = isset($cached['cached_at']) ? (int) $cached['cached_at'] : 0;
+    $payload = $cached['payload'] ?? NULL;
+    if (!is_array($payload) || empty($payload['process']) || !array_key_exists('tasks', $payload)) {
+      return NULL;
+    }
+
+    if ($cachedAt <= 0 || (time() - $cachedAt) > max(30, $ttlSeconds)) {
+      return NULL;
+    }
+
+    return $payload;
   }
 
   /**
@@ -4221,12 +4438,27 @@ class CttApiController extends ControllerBase {
    */
   public function getTask(Request $request) {
     try {
-      $uri = $request->query->get('uri', '');
-      $result = $this->hascoClient->getByUri($uri);
+      $uri = trim((string) $this->decodeMaybeEncodedUri((string) $request->query->get('uri', '')));
+      if (!$this->isUri($uri)) {
+        return new JsonResponse(['error' => 'Missing or invalid task URI.'], 400);
+      }
+
+      $result = $this->getByUriWithTransientRetry($uri, 3);
+      if (is_array($result) && !empty($result['error'])) {
+        $details = trim((string) $result['error']);
+        if ($this->isTransientHascoLookupError($details)) {
+          return new JsonResponse([
+            'error' => 'HASCOAPI backend is temporarily unavailable while loading workflow task.',
+            'details' => $details,
+            'requestedUri' => $uri,
+          ], 503);
+        }
+      }
+
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
-      return new JsonResponse(['error' => $e->getMessage()], 404);
+      return new JsonResponse(['error' => $e->getMessage()], 500);
     }
   }
 
@@ -4705,6 +4937,7 @@ class CttApiController extends ControllerBase {
 
     $instrumentMap = [];
     $componentMap = [];
+    $instrumentOwnerKeyCache = [];
 
     try {
       $api = \Drupal::service('rep.api_connector');
@@ -4763,6 +4996,46 @@ class CttApiController extends ControllerBase {
             $instrumentInstanceUri = trim((string) $deployment->instrumentInstanceUri);
           }
 
+          // WKF-SPEC-V3 org scoping: instrument instances are scoped by hasOwner.
+          $instrumentOwnerUri = '';
+          if (isset($deployment->instrumentInstance) && is_object($deployment->instrumentInstance)) {
+            if (isset($deployment->instrumentInstance->hasOwner)) {
+              $instrumentOwnerUri = $this->extractUriFromValue($deployment->instrumentInstance->hasOwner);
+            }
+            if ($instrumentOwnerUri === '' && isset($deployment->instrumentInstance->hasOwnerUri) && is_string($deployment->instrumentInstance->hasOwnerUri)) {
+              $instrumentOwnerUri = trim((string) $deployment->instrumentInstance->hasOwnerUri);
+            }
+          }
+
+          if ($instrumentOwnerUri === '' && $this->isUri($instrumentInstanceUri)) {
+            $cacheKey = $this->normalizeUriKey($instrumentInstanceUri);
+            if (isset($instrumentOwnerKeyCache[$cacheKey])) {
+              $instrumentOwnerUri = (string) $instrumentOwnerKeyCache[$cacheKey];
+            }
+            else {
+              try {
+                $instrumentInstance = $api->parseObjectResponse($api->getUri($instrumentInstanceUri), 'getUri');
+                if (is_object($instrumentInstance)) {
+                  if (isset($instrumentInstance->hasOwner)) {
+                    $instrumentOwnerUri = $this->extractUriFromValue($instrumentInstance->hasOwner);
+                  }
+                  if ($instrumentOwnerUri === '' && isset($instrumentInstance->hasOwnerUri) && is_string($instrumentInstance->hasOwnerUri)) {
+                    $instrumentOwnerUri = trim((string) $instrumentInstance->hasOwnerUri);
+                  }
+                }
+              }
+              catch (\Throwable $ignored) {
+                $instrumentOwnerUri = '';
+              }
+              $instrumentOwnerKeyCache[$cacheKey] = $instrumentOwnerUri;
+            }
+          }
+
+          $ownerKey = $this->normalizeUriKey($instrumentOwnerUri);
+          if ($ownerKey === '' || !isset($scopeKeys[$ownerKey])) {
+            continue;
+          }
+
           if ($this->isUri($instrumentInstanceUri)) {
             $instrumentMap[$instrumentInstanceUri] = [
               'uri' => $instrumentInstanceUri,
@@ -4770,12 +5043,37 @@ class CttApiController extends ControllerBase {
               'platformInstanceUri' => $platformInstanceUri,
               'instrumentUri' => $this->isUri($instrumentUri) ? $instrumentUri : '',
               'instrumentLabel' => $instrumentLabel,
+              'ownerUri' => $instrumentOwnerUri,
             ];
           }
 
           $componentInstances = [];
+          if (isset($deployment->componentDeployment)) {
+            $componentDeployments = is_array($deployment->componentDeployment)
+              ? $deployment->componentDeployment
+              : [$deployment->componentDeployment];
+
+            foreach ($componentDeployments as $componentDeployment) {
+              if (!is_object($componentDeployment)) {
+                continue;
+              }
+
+              $componentInstanceUri = '';
+              if (isset($componentDeployment->componentInstance)) {
+                $componentInstanceUri = $this->extractUriFromValue($componentDeployment->componentInstance);
+              }
+              if ($componentInstanceUri === '' && isset($componentDeployment->componentInstanceUri) && is_string($componentDeployment->componentInstanceUri)) {
+                $componentInstanceUri = trim((string) $componentDeployment->componentInstanceUri);
+              }
+
+              if ($this->isUri($componentInstanceUri)) {
+                $componentInstances[] = (object) ['uri' => $componentInstanceUri];
+              }
+            }
+          }
+
           if (isset($deployment->componentInstance) && is_array($deployment->componentInstance)) {
-            $componentInstances = $deployment->componentInstance;
+            $componentInstances = array_merge($componentInstances, $deployment->componentInstance);
           }
           elseif (isset($deployment->componentInstanceUri) && is_array($deployment->componentInstanceUri)) {
             foreach ($deployment->componentInstanceUri as $componentUriValue) {
@@ -5010,27 +5308,12 @@ class CttApiController extends ControllerBase {
 
       $this->getTaskSimulatorAssignmentStore()->set($this->taskSimulatorAssignmentKey($taskUri), $record);
 
-      // Keep compatibility with existing required-instrument task semantics.
-      $instrumentUri = trim((string) $record['instrumentUri']);
-      $componentUri = trim((string) $record['componentUri']);
-      if ($this->isUri($instrumentUri) && $this->isUri($componentUri)) {
-        $requiredInstrumentPayload = [
-          [
-            'instrumentUri' => $instrumentUri,
-            'requiredComponents' => [
-              [
-                'componentUri' => $componentUri,
-                'containerSlotUri' => '',
-              ],
-            ],
-          ],
-        ];
-        try {
-          $this->hascoClient->setTaskRequiredInstruments($taskUri, $requiredInstrumentPayload);
-        }
-        catch (\Throwable $ignored) {
-          // Persisted local simulator assignment remains authoritative for editor UX.
-        }
+      // WKF-SPEC-V3: persist selected ComponentInstance URI directly on Task.
+      try {
+        $this->hascoClient->setTaskUsesComponentInstances($taskUri, [$componentInstanceUri]);
+      }
+      catch (\Throwable $ignored) {
+        // Persisted local assignment remains authoritative for editor UX.
       }
 
       return new JsonResponse([
@@ -5769,15 +6052,41 @@ class CttApiController extends ControllerBase {
   /**
    * Build organization-scoped instrument payload with associated components.
    */
-  protected function buildOrganizationScopedInstrumentsPayload(?string $studyUri, ?string $processUri): array {
+  protected function buildOrganizationScopedInstrumentsPayload(?string $studyUri, ?string $processUri, ?string $organizationUriOverride = NULL, array $organizationScopeOverride = []): array {
     $context = $this->resolveCurrentUserOrganizationContext($studyUri);
     $organizationUri = trim((string) ($context['organizationUri'] ?? ''));
     $organizationLabel = trim((string) ($context['organizationLabel'] ?? ''));
+
+    $normalizedScopeOverride = [];
+    foreach ($organizationScopeOverride as $candidateScopeUri) {
+      if (!is_scalar($candidateScopeUri)) {
+        continue;
+      }
+      $scopeUri = trim((string) $candidateScopeUri);
+      if ($this->isUri($scopeUri)) {
+        $normalizedScopeOverride[$scopeUri] = TRUE;
+      }
+    }
+
+    if (is_string($organizationUriOverride)) {
+      $override = trim($organizationUriOverride);
+      if ($this->isUri($override)) {
+        $organizationUri = $override;
+        if ($organizationLabel === '') {
+          $organizationLabel = $this->resolveLabelByUri($organizationUri);
+        }
+      }
+    }
+
+    $organizationScopeUris = !empty($normalizedScopeOverride)
+      ? array_values(array_keys($normalizedScopeOverride))
+      : $this->resolveOrganizationScopeUris($organizationUri);
 
     $cacheKey = 'ctt.instrument.prefilter.v1.' . sha1(json_encode([
       'studyUri' => (string) $studyUri,
       'processUri' => (string) $processUri,
       'organizationUri' => $organizationUri,
+      'organizationScopeUris' => $organizationScopeUris,
       'user' => (string) $this->currentUser()->id(),
     ]));
 
@@ -5804,8 +6113,7 @@ class CttApiController extends ControllerBase {
 
     try {
       $api = \Drupal::service('rep.api_connector');
-      $scopeUris = $this->resolveOrganizationScopeUris($organizationUri);
-      $platformDetails = $this->resolveOrganizationPlatformInstances($scopeUris);
+      $platformDetails = $this->resolveOrganizationPlatformInstances($organizationScopeUris);
       if (empty($platformDetails)) {
         return $payload;
       }
@@ -6053,6 +6361,33 @@ class CttApiController extends ControllerBase {
         array_values(array_keys($scopeUris))
       );
 
+      $prefilterRows = [];
+      if (is_array($result)) {
+        $candidateRows = $result['payload']['instruments'] ?? NULL;
+        if (is_array($candidateRows)) {
+          $prefilterRows = $candidateRows;
+        }
+      }
+
+      if (is_array($result) && ($result['ok'] ?? FALSE) === TRUE && empty($prefilterRows)) {
+        $fallbackPayload = $this->buildOrganizationScopedInstrumentsPayload(
+          $studyUri,
+          $processUri,
+          $organizationUri,
+          array_values(array_keys($scopeUris))
+        );
+
+        if (!empty($fallbackPayload['instruments'])) {
+          $result = [
+            'ok' => TRUE,
+            'generatedAt' => gmdate('c'),
+            'count' => count($fallbackPayload['instruments']),
+            'payload' => $fallbackPayload,
+            'source' => 'drupal-fallback',
+          ];
+        }
+      }
+
       return new JsonResponse($result);
     }
     catch (\Throwable $e) {
@@ -6084,12 +6419,28 @@ class CttApiController extends ControllerBase {
    */
   public function getInstrument(Request $request) {
     try {
-      $uri = $request->query->get('uri', '');
-      $result = $this->hascoClient->getInstrumentByUri($uri);
+      $uri = trim((string) $this->decodeMaybeEncodedUri((string) $request->query->get('uri', '')));
+      if (!$this->isUri($uri)) {
+        return new JsonResponse(['error' => 'Missing or invalid instrument URI.'], 400);
+      }
+
+      $result = $this->callWithTransientRetry(function () use ($uri) {
+        return $this->hascoClient->getInstrumentByUri($uri);
+      }, 3);
+
+      $details = $this->extractResultErrorText($result);
+      if ($details !== '' && $this->isTransientHascoLookupError($details)) {
+        return new JsonResponse([
+          'error' => 'HASCOAPI backend is temporarily unavailable while loading instrument.',
+          'details' => $details,
+          'requestedUri' => $uri,
+        ], 503);
+      }
+
       return new JsonResponse($result);
     }
     catch (\Throwable $e) {
-      return new JsonResponse(['error' => $e->getMessage()], 404);
+      return new JsonResponse(['error' => $e->getMessage()], 500);
     }
   }
 
@@ -6098,8 +6449,24 @@ class CttApiController extends ControllerBase {
    */
   public function getInstrumentComponents(Request $request) {
     try {
-      $uri = $request->query->get('uri', '');
-      $result = $this->hascoClient->getInstrumentComponents($uri);
+      $uri = trim((string) $this->decodeMaybeEncodedUri((string) $request->query->get('uri', '')));
+      if (!$this->isUri($uri)) {
+        return new JsonResponse(['error' => 'Missing or invalid instrument URI.'], 400);
+      }
+
+      $result = $this->callWithTransientRetry(function () use ($uri) {
+        return $this->hascoClient->getInstrumentComponents($uri);
+      }, 3);
+
+      $details = $this->extractResultErrorText($result);
+      if ($details !== '' && $this->isTransientHascoLookupError($details)) {
+        return new JsonResponse([
+          'error' => 'HASCOAPI backend is temporarily unavailable while loading instrument components.',
+          'details' => $details,
+          'requestedUri' => $uri,
+        ], 503);
+      }
+
       return new JsonResponse($result);
     }
     catch (\Exception $e) {
@@ -6112,7 +6479,7 @@ class CttApiController extends ControllerBase {
    */
   public function getInstrumentContainerSlotsQuery(Request $request) {
     try {
-      $uri = $request->query->get('uri', '');
+      $uri = trim((string) $this->decodeMaybeEncodedUri((string) $request->query->get('uri', '')));
       if ($uri === '') {
         // Optional: allow URL-safe base64 to avoid any encoding issues.
         // Example: /workflow/api/instrument/containerslots?uri_b64=...
@@ -6132,7 +6499,24 @@ class CttApiController extends ControllerBase {
       if ($uri === '') {
         return new JsonResponse(['error' => 'Missing uri'], 400);
       }
-      $result = $this->hascoClient->getInstrumentContainerSlots($uri);
+
+      if (!$this->isUri($uri)) {
+        return new JsonResponse(['error' => 'Missing or invalid instrument URI.'], 400);
+      }
+
+      $result = $this->callWithTransientRetry(function () use ($uri) {
+        return $this->hascoClient->getInstrumentContainerSlots($uri);
+      }, 3);
+
+      $details = $this->extractResultErrorText($result);
+      if ($details !== '' && $this->isTransientHascoLookupError($details)) {
+        return new JsonResponse([
+          'error' => 'HASCOAPI backend is temporarily unavailable while loading instrument container slots.',
+          'details' => $details,
+          'requestedUri' => $uri,
+        ], 503);
+      }
+
       return new JsonResponse($result);
     }
     catch (\Exception $e) {

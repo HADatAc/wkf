@@ -1719,6 +1719,41 @@ class CttHascoClient {
     return $this->getByUri($task_uri);
   }
 
+  /**
+   * Set task component instance links (WKF-SPEC-V3).
+   *
+   * hascoapi expects:
+   * { taskuri: string, usesComponentInstance: string[] }
+   */
+  public function setTaskUsesComponentInstances(string $task_uri, array $component_instance_uris): array {
+    $task_uri = trim($task_uri);
+    if ($task_uri === '') {
+      throw new \RuntimeException('Missing task URI for component instance assignment');
+    }
+
+    $normalized = [];
+    foreach ($component_instance_uris as $uri) {
+      if (!is_string($uri)) {
+        continue;
+      }
+      $value = trim($uri);
+      if ($value === '') {
+        continue;
+      }
+      $normalized[$value] = $value;
+    }
+
+    $response = $this->request('POST', '/hascoapi/api/task/componentinstances', [
+      'json' => [
+        'taskuri' => $task_uri,
+        'usesComponentInstance' => array_values($normalized),
+      ],
+    ]);
+    $this->assertOperationSuccessful($response, 'Task usesComponentInstance');
+
+    return $this->getByUri($task_uri);
+  }
+
   // ================================================================
   // Instrument operations
   // ================================================================

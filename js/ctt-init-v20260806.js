@@ -1457,7 +1457,7 @@
           continue;
         }
         var label = normalizeControlText(control);
-        if (!/(assign instrument|edit instrument|new task|new subtask|delete|remove|change parent|set root|auto order tasks)/.test(label)) {
+        if (!/(assign instrument|assign component instance|edit instrument|edit component instance|new task|new subtask|delete|remove|change parent|set root|auto order tasks)/.test(label)) {
           continue;
         }
 
@@ -1538,8 +1538,8 @@
       var backdrop = document.createElement('div');
       backdrop.className = 'ctt-sim-modal-backdrop';
       backdrop.innerHTML = ''
-        + '<div class="ctt-sim-modal" role="dialog" aria-modal="true" aria-label="Assign Simulator">'
-        + '  <h3>Assign Simulator</h3>'
+        + '<div class="ctt-sim-modal" role="dialog" aria-modal="true" aria-label="Assign Component Instance">'
+        + '  <h3>Assign Component Instance</h3>'
         + '  <div class="ctt-sim-grid">'
         + '    <div><label>Platform Instance</label><select data-ctt-sim-platform><option value="">Loading...</option></select></div>'
         + '    <div><label>Instrument Instance</label><select data-ctt-sim-instrument disabled="disabled"><option value="">Select a platform instance first</option></select></div>'
@@ -1698,7 +1698,7 @@
         }
 
         confirmBtn.disabled = true;
-        setStatus('Saving simulator mapping...');
+        setStatus('Saving component instance assignment...');
 
         var payload = {
           platformInstanceUri: String(platformSelect.value || '').trim(),
@@ -1733,7 +1733,7 @@
         });
       });
 
-      setStatus('Loading simulator options...');
+      setStatus('Loading component instance options...');
       window.fetch(endpoint, {
         method: 'GET',
         credentials: 'same-origin',
@@ -1772,7 +1772,7 @@
         button.type = 'button';
         button.className = 'btn btn-sm btn-outline-primary ctt-assign-simulator-btn';
         button.setAttribute('data-ctt-assign-simulator', '1');
-        button.textContent = 'Assign Simulator';
+        button.textContent = 'Assign Component Instance';
         host.appendChild(button);
 
         button.addEventListener('click', function () {
@@ -1799,7 +1799,23 @@
       }
     }
 
+    function relabelLegacyAssignInstrumentControls() {
+      var controls = container.querySelectorAll('button, [role="button"], a[role="button"], a');
+      controls.forEach(function (control) {
+        var label = normalizeControlText(control);
+        if (label === 'assign instrument') {
+          control.style.display = 'none';
+          control.setAttribute('data-ctt-legacy-assign-hidden', '1');
+        }
+        else if (label === 'edit instrument') {
+          control.style.display = 'none';
+          control.setAttribute('data-ctt-legacy-assign-hidden', '1');
+        }
+      });
+    }
+
     var observer = new MutationObserver(function () {
+      relabelLegacyAssignInstrumentControls();
       refreshActionBarButton();
       renderTaskAssignmentBadges();
     });
@@ -1813,6 +1829,7 @@
     ensureStyles();
     loadAuthoritativeMetadata();
     loadAssignments();
+    relabelLegacyAssignInstrumentControls();
     refreshActionBarButton();
     renderTaskAssignmentBadges();
   }
@@ -4548,7 +4565,7 @@
     var controls = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
     controls.forEach(function (control) {
       var label = normalizeControlText(control);
-      var isEditingControl = /\b(save to api|save|tasks palette|task palette|create sub-?task|new sub-?task|new task|add child|add subtask|assign instrument|edit instrument|delete|remove|change parent|set root|auto order)\b/.test(label);
+      var isEditingControl = /\b(save to api|save|tasks palette|task palette|create sub-?task|new sub-?task|new task|add child|add subtask|assign instrument|assign component instance|edit instrument|edit component instance|delete|remove|change parent|set root|auto order)\b/.test(label);
       if (!isEditingControl) {
         return;
       }

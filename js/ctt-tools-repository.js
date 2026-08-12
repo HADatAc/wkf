@@ -223,82 +223,162 @@
     return options;
   };
 
-  const refreshScenarioFilterOptions = function (state, tools) {
-    if (!state.filterScenarioUri) {
-      return;
-    }
-
-    const current = String(state.filterScenarioUri.value || state.initialScenarioUri || "").trim();
-    const scenarioMap = {};
-
-    (state.processEntries || []).forEach(function (entry) {
-      const scenarioUri = String(entry.scenarioUri || "").trim();
-      if (isHttpUri(scenarioUri)) {
-        scenarioMap[scenarioUri] = scenarioUri;
-      }
-    });
-
-    (Array.isArray(tools) ? tools : []).forEach(function (tool) {
-      const scenarioUri = String(tool.scenarioUri || "").trim();
-      if (isHttpUri(scenarioUri)) {
-        scenarioMap[scenarioUri] = scenarioUri;
-      }
-    });
-
-    const scenarios = Object.keys(scenarioMap).sort(function (a, b) {
-      return a.localeCompare(b);
-    }).map(function (uri) {
-      return { value: uri, label: uri };
-    });
-
-    if (isHttpUri(state.initialScenarioUri) && !Object.prototype.hasOwnProperty.call(scenarioMap, state.initialScenarioUri)) {
-      scenarios.unshift({ value: state.initialScenarioUri, label: state.initialScenarioUri });
-    }
-
-    state.filterScenarioUri.innerHTML = toSelectOptionsHtml(scenarios, current, "Any scenario");
+  const getActiveFacetFilters = function (state) {
+    return {
+      language: String(state.filterLanguage && state.filterLanguage.value || "").trim().toLowerCase(),
+      owner: String(state.filterOwner && state.filterOwner.value || "").trim().toLowerCase(),
+      processUri: String(state.filterProcessUri && state.filterProcessUri.value || "").trim(),
+      institution: String(state.filterInstitution && state.filterInstitution.value || "").trim().toLowerCase(),
+      scenarioUri: String(state.filterScenarioUri && state.filterScenarioUri.value || "").trim(),
+      datasetUri: String(state.filterDatasetUri && state.filterDatasetUri.value || "").trim().toLowerCase(),
+    };
   };
 
-  const refreshOwnerFilterOptions = function (state, tools) {
-    if (!state.filterOwner) {
-      return;
+  const toolMatchesFacetFilters = function (tool, filters, ignoreFacet) {
+    const language = String(tool.language || "").trim().toLowerCase();
+    const ownerEmail = String(tool.ownerUserEmail || tool.owner || tool.createdBy || "").trim().toLowerCase();
+    const processUri = String(tool.processUri || "").trim();
+    const institution = String(tool.institution || "").trim().toLowerCase();
+    const scenarioUri = String(tool.scenarioUri || "").trim();
+    const scenarioUriLower = scenarioUri.toLowerCase();
+    const datasetUri = String(tool.datasetUri || "").trim().toLowerCase();
+
+    if (ignoreFacet !== "language" && filters.language !== "" && language !== filters.language) {
+      return false;
+    }
+    if (ignoreFacet !== "owner" && filters.owner !== "" && ownerEmail.indexOf(filters.owner) === -1) {
+      return false;
+    }
+    if (ignoreFacet !== "processUri" && filters.processUri !== "" && processUri !== filters.processUri) {
+      return false;
+    }
+    if (ignoreFacet !== "institution" && filters.institution !== "" && institution.indexOf(filters.institution) === -1) {
+      return false;
+    }
+    if (ignoreFacet !== "scenarioUri"
+      && filters.scenarioUri !== ""
+      && scenarioUriLower !== ""
+      && scenarioUriLower !== filters.scenarioUri.toLowerCase()) {
+      return false;
+    }
+    if (ignoreFacet !== "datasetUri" && filters.datasetUri !== "" && datasetUri !== filters.datasetUri) {
+      return false;
     }
 
-    const current = String(state.filterOwner.value || "").trim();
-    const ownerMap = {};
-    (Array.isArray(tools) ? tools : []).forEach(function (tool) {
-      const owner = String(tool.ownerUserEmail || tool.owner || tool.createdBy || "").trim();
-      if (owner !== "") {
-        ownerMap[owner] = owner;
-      }
-    });
-
-    const owners = Object.keys(ownerMap).sort(function (a, b) {
-      return a.localeCompare(b);
-    }).map(function (owner) {
-      return { value: owner, label: owner };
-    });
-
-    state.filterOwner.innerHTML = toSelectOptionsHtml(owners, current, "Any owner");
+    return true;
   };
 
-  const refreshProcessFilterOptions = function (state) {
-    if (!state.filterProcessUri) {
-      return;
+  const ensureSelectedFacetOption = function (options, selectedValue) {
+    const selected = String(selectedValue || "").trim();
+    if (selected === "") {
+      return options;
     }
 
-    const current = String(state.filterProcessUri.value || state.initialProcessUri || "").trim();
-    const selectedScenario = String(state.filterScenarioUri && state.filterScenarioUri.value || "").trim();
+    const exists = options.some(function (option) {
+      return String(option.value || "").trim() === selected;
+    });
+    if (!exists) {
+      options.unshift({ value: selected, label: selected });
+    }
+    return options;
+  };
 
-    const processMap = {};
+  const buildProcessEntryIndex = function (state) {
+    const index = {};
     (state.processEntries || []).forEach(function (entry) {
       const processUri = String(entry.processUri || "").trim();
-      const scenarioUri = String(entry.scenarioUri || "").trim();
       if (!isHttpUri(processUri)) {
         return;
       }
-      if (selectedScenario !== "" && scenarioUri !== selectedScenario) {
+      if (!Object.prototype.hasOwnProperty.call(index, processUri)) {
+        index[processUri] = {
+          processUri: processUri,
+          label: String(entry.label || processUri).trim() || processUri,
+          scenarioUri: String(entry.scenarioUri || "").trim(),
+        };
+      }
+    });
+    return index;
+  };
+
+  const refreshFacetOptions = function (state, tools) {
+    const allTools = Array.isArray(tools) ? tools : [];
+    const filters = getActiveFacetFilters(state);
+    const processIndex = buildProcessEntryIndex(state);
+
+    const toolsForScenario = allTools.filter(function (tool) {
+      return toolMatchesFacetFilters(tool, filters, "scenarioUri");
+    });
+    const toolsForProcess = allTools.filter(function (tool) {
+      return toolMatchesFacetFilters(tool, filters, "processUri");
+    });
+    const toolsForOwner = allTools.filter(function (tool) {
+      return toolMatchesFacetFilters(tool, filters, "owner");
+    });
+    const toolsForInstitution = allTools.filter(function (tool) {
+      return toolMatchesFacetFilters(tool, filters, "institution");
+    });
+
+    const scenarioMap = {};
+    const processMap = {};
+    const ownerMap = {};
+    const institutionMap = {};
+
+    const processUrisInScenarioScope = {};
+    toolsForScenario.forEach(function (tool) {
+      const processUri = String(tool.processUri || "").trim();
+      const scenarioUri = String(tool.scenarioUri || "").trim();
+      if (isHttpUri(processUri)) {
+        processUrisInScenarioScope[processUri] = true;
+      }
+      if (isHttpUri(scenarioUri)) {
+        scenarioMap[scenarioUri] = scenarioUri;
+      }
+    });
+
+    Object.keys(processIndex).forEach(function (processUri) {
+      const entry = processIndex[processUri];
+      const entryScenarioUri = String(entry.scenarioUri || "").trim();
+
+      if (Object.keys(processUrisInScenarioScope).length > 0
+        && !Object.prototype.hasOwnProperty.call(processUrisInScenarioScope, processUri)) {
         return;
       }
+
+      if (isHttpUri(entryScenarioUri)) {
+        scenarioMap[entryScenarioUri] = entryScenarioUri;
+      }
+    });
+
+    toolsForProcess.forEach(function (tool) {
+      const processUri = String(tool.processUri || "").trim();
+      if (!isHttpUri(processUri)) {
+        return;
+      }
+      if (filters.scenarioUri !== "") {
+        const toolScenarioUri = String(tool.scenarioUri || "").trim();
+        if (toolScenarioUri !== "" && toolScenarioUri.toLowerCase() !== filters.scenarioUri.toLowerCase()) {
+          return;
+        }
+      }
+
+      const indexed = processIndex[processUri];
+      const label = indexed ? indexed.label : processUri;
+      processMap[processUri] = {
+        value: processUri,
+        label: String(label || processUri).trim() || processUri,
+      };
+    });
+
+    Object.keys(processIndex).forEach(function (processUri) {
+      const entry = processIndex[processUri];
+      const entryScenarioUri = String(entry.scenarioUri || "").trim();
+      if (filters.scenarioUri !== ""
+        && entryScenarioUri !== ""
+        && entryScenarioUri.toLowerCase() !== filters.scenarioUri.toLowerCase()) {
+        return;
+      }
+
       if (!Object.prototype.hasOwnProperty.call(processMap, processUri)) {
         processMap[processUri] = {
           value: processUri,
@@ -307,22 +387,85 @@
       }
     });
 
-    if (isHttpUri(state.initialProcessUri) && !Object.prototype.hasOwnProperty.call(processMap, state.initialProcessUri)) {
-      const canIncludeInitial = selectedScenario === ""
-        || !isHttpUri(state.initialScenarioUri)
-        || state.initialScenarioUri === selectedScenario;
-      if (canIncludeInitial) {
-        processMap[state.initialProcessUri] = {
-          value: state.initialProcessUri,
-          label: state.initialProcessUri,
-        };
+    toolsForOwner.forEach(function (tool) {
+      const owner = String(tool.ownerUserEmail || tool.owner || tool.createdBy || "").trim();
+      if (owner !== "") {
+        ownerMap[owner] = owner;
       }
+    });
+
+    toolsForInstitution.forEach(function (tool) {
+      const institutionValue = String(tool.institution || "").trim();
+      if (institutionValue !== "") {
+        institutionMap[institutionValue] = institutionValue;
+      }
+    });
+
+    if (state.filterScenarioUri) {
+      const selectedScenario = String(state.filterScenarioUri.value || state.initialScenarioUri || "").trim();
+      let scenarioOptions = Object.keys(scenarioMap).sort(function (a, b) {
+        return a.localeCompare(b);
+      }).map(function (uri) {
+        return { value: uri, label: uri };
+      });
+
+      if (isHttpUri(state.initialScenarioUri) && !Object.prototype.hasOwnProperty.call(scenarioMap, state.initialScenarioUri)) {
+        scenarioOptions.unshift({ value: state.initialScenarioUri, label: state.initialScenarioUri });
+      }
+
+      scenarioOptions = ensureSelectedFacetOption(scenarioOptions, selectedScenario);
+      state.filterScenarioUri.innerHTML = toSelectOptionsHtml(scenarioOptions, selectedScenario, "Any scenario");
     }
 
-    const options = Object.values(processMap).sort(function (a, b) {
-      return String(a.label || "").localeCompare(String(b.label || ""));
-    });
-    state.filterProcessUri.innerHTML = toSelectOptionsHtml(options, current, "All processes");
+    if (state.filterProcessUri) {
+      const selectedProcess = String(state.filterProcessUri.value || state.initialProcessUri || "").trim();
+      let processOptions = Object.values(processMap).sort(function (left, right) {
+        return String(left.label || "").localeCompare(String(right.label || ""));
+      });
+
+      if (isHttpUri(state.initialProcessUri) && !Object.prototype.hasOwnProperty.call(processMap, state.initialProcessUri)) {
+        processOptions.unshift({ value: state.initialProcessUri, label: state.initialProcessUri });
+      }
+
+      processOptions = ensureSelectedFacetOption(processOptions, selectedProcess);
+      state.filterProcessUri.innerHTML = toSelectOptionsHtml(processOptions, selectedProcess, "All processes");
+    }
+
+    if (state.filterOwner) {
+      const selectedOwner = String(state.filterOwner.value || "").trim();
+      let ownerOptions = Object.keys(ownerMap).sort(function (a, b) {
+        return a.localeCompare(b);
+      }).map(function (owner) {
+        return { value: owner, label: owner };
+      });
+
+      ownerOptions = ensureSelectedFacetOption(ownerOptions, selectedOwner);
+      state.filterOwner.innerHTML = toSelectOptionsHtml(ownerOptions, selectedOwner, "Any owner");
+    }
+
+    if (state.filterInstitution) {
+      const selectedInstitution = String(state.filterInstitution.value || "").trim();
+      let institutionOptions = Object.keys(institutionMap).sort(function (a, b) {
+        return a.localeCompare(b);
+      }).map(function (value) {
+        return { value: value, label: value };
+      });
+
+      institutionOptions = ensureSelectedFacetOption(institutionOptions, selectedInstitution);
+      state.filterInstitution.innerHTML = toSelectOptionsHtml(institutionOptions, selectedInstitution, "Any institution");
+    }
+  };
+
+  const refreshScenarioFilterOptions = function (state, tools) {
+    refreshFacetOptions(state, tools);
+  };
+
+  const refreshOwnerFilterOptions = function (state, tools) {
+    refreshFacetOptions(state, tools);
+  };
+
+  const refreshProcessFilterOptions = function (state) {
+    refreshFacetOptions(state, state.lastTools || []);
   };
 
   const mergeProcessEntries = function (state, tools) {
@@ -548,10 +691,9 @@
       }
 
       const tools = Array.isArray(payload.body) ? payload.body : [];
+      state.lastTools = tools;
       mergeProcessEntries(state, tools);
-      refreshScenarioFilterOptions(state, tools);
-      refreshProcessFilterOptions(state);
-      refreshOwnerFilterOptions(state, tools);
+      refreshFacetOptions(state, tools);
       renderTable(state, tools);
 
       const total = Number(payload.pagination && payload.pagination.total || tools.length || 0);
@@ -915,6 +1057,7 @@
           currentUserPersonUri: String(settings.currentUserPersonUri || "").trim(),
           currentUserInstitutionUri: String(settings.currentUserInstitutionUri || "").trim(),
           currentUserInstitutionLabel: String(settings.currentUserInstitutionLabel || "").trim(),
+          lastTools: [],
         };
 
         if (state.filterScenarioUri && settings.initialScenarioUri) {
@@ -930,7 +1073,37 @@
 
         if (state.filterScenarioUri) {
           state.filterScenarioUri.addEventListener("change", function () {
-            refreshProcessFilterOptions(state);
+            refreshFacetOptions(state, state.lastTools || []);
+          });
+        }
+
+        if (state.filterProcessUri) {
+          state.filterProcessUri.addEventListener("change", function () {
+            refreshFacetOptions(state, state.lastTools || []);
+          });
+        }
+
+        if (state.filterOwner) {
+          state.filterOwner.addEventListener("change", function () {
+            refreshFacetOptions(state, state.lastTools || []);
+          });
+        }
+
+        if (state.filterInstitution) {
+          state.filterInstitution.addEventListener("change", function () {
+            refreshFacetOptions(state, state.lastTools || []);
+          });
+        }
+
+        if (state.filterLanguage) {
+          state.filterLanguage.addEventListener("change", function () {
+            refreshFacetOptions(state, state.lastTools || []);
+          });
+        }
+
+        if (state.filterDatasetUri) {
+          state.filterDatasetUri.addEventListener("change", function () {
+            refreshFacetOptions(state, state.lastTools || []);
           });
         }
 
@@ -987,8 +1160,7 @@
           }
         } else {
           loadProcesses(state).then(function () {
-            refreshScenarioFilterOptions(state, []);
-            refreshProcessFilterOptions(state);
+            refreshFacetOptions(state, []);
             loadTools(state);
           });
         }
