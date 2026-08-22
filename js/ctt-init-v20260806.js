@@ -5242,6 +5242,416 @@
     }, { once: true });
   }
 
+  /**
+   * Bridge for global tooltip toggles in the React editor.
+   *
+   * Some controls request "show all tooltips", but tooltip panels are rendered
+   * with hover-only utility classes (hidden + group-hover:block). This helper
+   * force-shows those panels when the toggle is active and restores default
+   * hover behavior when disabled.
+   */
+  function installTooltipVisibilityBridge(container) {
+    if (!container || container.__cttTooltipBridgeInstalled) {
+      return;
+    }
+    container.__cttTooltipBridgeInstalled = true;
+
+    var showAll = false;
+    var debugEnabled = false;
+    var debugBadge = null;
+
+    try {
+      var params = new URLSearchParams(String(window.location.search || ''));
+      var dbg = String(params.get('tooltip_debug') || '').toLowerCase();
+      debugEnabled = (dbg === '1' || dbg === 'true' || dbg === 'yes');
+    }
+    catch (e) {
+      debugEnabled = false;
+    }
+
+    function ensureDebugBadge() {
+      if (!debugEnabled) {
+        return null;
+      }
+      if (debugBadge && debugBadge.parentNode) {
+        return debugBadge;
+      }
+
+      debugBadge = document.createElement('div');
+      debugBadge.setAttribute('id', 'ctt-tooltip-debug-badge');
+      debugBadge.style.cssText = [
+        'position:fixed',
+        'right:12px',
+        'bottom:12px',
+        'z-index:2147483647',
+        'max-width:360px',
+        'padding:8px 10px',
+        'border:1px solid #f59e0b',
+        'background:#fffbeb',
+        'color:#7c2d12',
+        'font:12px/1.3 monospace',
+        'border-radius:8px',
+        'box-shadow:0 4px 12px rgba(0,0,0,.15)',
+        'white-space:pre-wrap'
+      ].join(';') + ';';
+
+      var host = document.body || container;
+      host.appendChild(debugBadge);
+      return debugBadge;
+    }
+
+    function setDebugText(reason) {
+      if (!debugEnabled) {
+        return;
+      }
+      var badge = ensureDebugBadge();
+      if (!badge) {
+        return;
+      }
+      var panelCount = getTooltipPanels().length;
+      badge.textContent = [
+        '[tooltip-debug]',
+        'reason=' + String(reason || 'n/a'),
+        'showAll=' + (showAll ? 'true' : 'false'),
+        'panels=' + panelCount,
+        'time=' + new Date().toLocaleTimeString()
+      ].join('\n');
+    }
+
+    function getTooltipPanels() {
+      var root = (document && document.body) ? document.body : container;
+      return Array.prototype.slice.call(
+        root.querySelectorAll(
+          [
+            'div[class*="group-hover:block"]',
+            'div[class*="group-focus-within:block"]',
+            'div[class*="group-hover:opacity-"]',
+            'div[class*="group-focus-within:opacity-"]',
+            'div[class*="group-hover:visible"]',
+            'div[class*="group-focus-within:visible"]',
+            '[role="tooltip"]',
+            '[class*="tooltip"]',
+            '[data-tooltip]',
+            '[data-tip]'
+          ].join(',')
+        )
+      );
+    }
+
+    function applyVisibility() {
+      var panels = getTooltipPanels();
+      panels.forEach(function (panel) {
+        if (!(panel instanceof HTMLElement)) {
+          return;
+        }
+
+        if (showAll) {
+          if (!panel.hasAttribute('data-ctt-tooltip-prev-display')) {
+            panel.setAttribute('data-ctt-tooltip-prev-display', panel.style.display || '');
+          }
+          if (!panel.hasAttribute('data-ctt-tooltip-prev-opacity')) {
+            panel.setAttribute('data-ctt-tooltip-prev-opacity', panel.style.opacity || '');
+          }
+          if (!panel.hasAttribute('data-ctt-tooltip-prev-visibility')) {
+            panel.setAttribute('data-ctt-tooltip-prev-visibility', panel.style.visibility || '');
+          }
+          if (!panel.hasAttribute('data-ctt-tooltip-prev-pointer-events')) {
+            panel.setAttribute('data-ctt-tooltip-prev-pointer-events', panel.style.pointerEvents || '');
+          }
+          if (!panel.hasAttribute('data-ctt-tooltip-had-hidden')) {
+            panel.setAttribute('data-ctt-tooltip-had-hidden', panel.classList.contains('hidden') ? '1' : '0');
+          }
+          if (!panel.hasAttribute('data-ctt-tooltip-had-invisible')) {
+            panel.setAttribute('data-ctt-tooltip-had-invisible', panel.classList.contains('invisible') ? '1' : '0');
+          }
+
+          panel.classList.remove('hidden');
+          panel.classList.remove('invisible');
+          panel.style.display = 'block';
+          panel.style.pointerEvents = 'auto';
+          panel.style.opacity = '1';
+          panel.style.visibility = 'visible';
+        }
+        else {
+          var hadHidden = panel.getAttribute('data-ctt-tooltip-had-hidden') === '1';
+          var hadInvisible = panel.getAttribute('data-ctt-tooltip-had-invisible') === '1';
+          var prevDisplay = panel.getAttribute('data-ctt-tooltip-prev-display');
+          var prevOpacity = panel.getAttribute('data-ctt-tooltip-prev-opacity');
+          var prevVisibility = panel.getAttribute('data-ctt-tooltip-prev-visibility');
+          var prevPointerEvents = panel.getAttribute('data-ctt-tooltip-prev-pointer-events');
+
+          if (hadHidden) {
+            panel.classList.add('hidden');
+          }
+          if (hadInvisible) {
+            panel.classList.add('invisible');
+          }
+          panel.style.display = (typeof prevDisplay === 'string') ? prevDisplay : '';
+          panel.style.opacity = (typeof prevOpacity === 'string') ? prevOpacity : '';
+          panel.style.visibility = (typeof prevVisibility === 'string') ? prevVisibility : '';
+          panel.style.pointerEvents = (typeof prevPointerEvents === 'string') ? prevPointerEvents : '';
+
+          panel.removeAttribute('data-ctt-tooltip-prev-display');
+          panel.removeAttribute('data-ctt-tooltip-prev-opacity');
+          panel.removeAttribute('data-ctt-tooltip-prev-visibility');
+          panel.removeAttribute('data-ctt-tooltip-prev-pointer-events');
+          panel.removeAttribute('data-ctt-tooltip-had-hidden');
+          panel.removeAttribute('data-ctt-tooltip-had-invisible');
+        }
+      });
+
+      setDebugText('applyVisibility');
+    }
+
+    function classifyTooltipIntent(button) {
+      if (!button) {
+        return null;
+      }
+      var txt = String(button.textContent || '').trim().toLowerCase();
+      var title = String(button.getAttribute('title') || '').trim().toLowerCase();
+      var label = String(button.getAttribute('aria-label') || '').trim().toLowerCase();
+      var merged = (txt + ' ' + title + ' ' + label).replace(/\s+/g, ' ').trim();
+
+      if (!merged) {
+        return null;
+      }
+
+      var hasTooltipWord = merged.indexOf('tooltip') !== -1 || merged.indexOf('tips') !== -1 || merged.indexOf('help') !== -1;
+      var hasShowAllWord = merged.indexOf('show all') !== -1;
+      var hasHideAllWord = merged.indexOf('hide all') !== -1;
+
+      // Accept generic "show all" / "hide all" controls in task panels,
+      // even when the label does not include the word "tooltip".
+      if (hasShowAllWord) {
+        return 'show';
+      }
+      if (hasHideAllWord) {
+        return 'hide';
+      }
+
+      if (!hasTooltipWord) {
+        return null;
+      }
+
+      if (merged.indexOf('show') !== -1) {
+        return 'show';
+      }
+      if (merged.indexOf('hide') !== -1) {
+        return 'hide';
+      }
+      return 'toggle';
+    }
+
+    function inferIntentFromInputControl(inputEl) {
+      if (!(inputEl instanceof HTMLElement)) {
+        return null;
+      }
+
+      var aria = String(inputEl.getAttribute('aria-label') || '').toLowerCase();
+      var title = String(inputEl.getAttribute('title') || '').toLowerCase();
+      var id = String(inputEl.id || '').trim();
+      var labelText = '';
+
+      if (id) {
+        var labelEl = container.querySelector('label[for="' + id.replace(/"/g, '\\"') + '"]');
+        if (labelEl) {
+          labelText = String(labelEl.textContent || '').toLowerCase();
+        }
+      }
+
+      var merged = [aria, title, labelText, String(inputEl.textContent || '').toLowerCase()].join(' ').trim();
+      if (merged.indexOf('tooltip') === -1 && merged.indexOf('tips') === -1 && merged.indexOf('help') === -1) {
+        return null;
+      }
+
+      if (inputEl instanceof HTMLInputElement && inputEl.type === 'checkbox') {
+        return inputEl.checked ? 'show' : 'hide';
+      }
+
+      var role = String(inputEl.getAttribute('role') || '').toLowerCase();
+      if (role === 'switch') {
+        var checkedAttr = String(inputEl.getAttribute('aria-checked') || '').toLowerCase();
+        return checkedAttr === 'true' ? 'show' : 'hide';
+      }
+
+      return 'toggle';
+    }
+
+    function findSiblingTooltipPanel(button) {
+      if (!button || !(button instanceof Element)) {
+        return null;
+      }
+
+      var group = button.closest('.group');
+      if (!group) {
+        return null;
+      }
+
+      var panel = group.querySelector('div[class*="group-hover:block"], div[class*="group-focus-within:block"]');
+      return panel instanceof HTMLElement ? panel : null;
+    }
+
+    function setPanelVisible(panel, visible) {
+      if (!panel) {
+        return;
+      }
+
+      if (visible) {
+        if (!panel.hasAttribute('data-ctt-tooltip-prev-display')) {
+          panel.setAttribute('data-ctt-tooltip-prev-display', panel.style.display || '');
+        }
+        if (!panel.hasAttribute('data-ctt-tooltip-prev-opacity')) {
+          panel.setAttribute('data-ctt-tooltip-prev-opacity', panel.style.opacity || '');
+        }
+        if (!panel.hasAttribute('data-ctt-tooltip-prev-visibility')) {
+          panel.setAttribute('data-ctt-tooltip-prev-visibility', panel.style.visibility || '');
+        }
+        if (!panel.hasAttribute('data-ctt-tooltip-prev-pointer-events')) {
+          panel.setAttribute('data-ctt-tooltip-prev-pointer-events', panel.style.pointerEvents || '');
+        }
+        if (!panel.hasAttribute('data-ctt-tooltip-had-hidden')) {
+          panel.setAttribute('data-ctt-tooltip-had-hidden', panel.classList.contains('hidden') ? '1' : '0');
+        }
+        if (!panel.hasAttribute('data-ctt-tooltip-had-invisible')) {
+          panel.setAttribute('data-ctt-tooltip-had-invisible', panel.classList.contains('invisible') ? '1' : '0');
+        }
+        panel.classList.remove('hidden');
+        panel.classList.remove('invisible');
+        panel.style.display = 'block';
+        panel.style.pointerEvents = 'auto';
+        panel.style.opacity = '1';
+        panel.style.visibility = 'visible';
+      }
+      else {
+        var hadHidden = panel.getAttribute('data-ctt-tooltip-had-hidden') === '1';
+        var hadInvisible = panel.getAttribute('data-ctt-tooltip-had-invisible') === '1';
+        var prevDisplay = panel.getAttribute('data-ctt-tooltip-prev-display');
+        var prevOpacity = panel.getAttribute('data-ctt-tooltip-prev-opacity');
+        var prevVisibility = panel.getAttribute('data-ctt-tooltip-prev-visibility');
+        var prevPointerEvents = panel.getAttribute('data-ctt-tooltip-prev-pointer-events');
+        if (hadHidden) {
+          panel.classList.add('hidden');
+        }
+        if (hadInvisible) {
+          panel.classList.add('invisible');
+        }
+        panel.style.display = (typeof prevDisplay === 'string') ? prevDisplay : '';
+        panel.style.opacity = (typeof prevOpacity === 'string') ? prevOpacity : '';
+        panel.style.visibility = (typeof prevVisibility === 'string') ? prevVisibility : '';
+        panel.style.pointerEvents = (typeof prevPointerEvents === 'string') ? prevPointerEvents : '';
+        panel.removeAttribute('data-ctt-tooltip-prev-display');
+        panel.removeAttribute('data-ctt-tooltip-prev-opacity');
+        panel.removeAttribute('data-ctt-tooltip-prev-visibility');
+        panel.removeAttribute('data-ctt-tooltip-prev-pointer-events');
+        panel.removeAttribute('data-ctt-tooltip-had-hidden');
+        panel.removeAttribute('data-ctt-tooltip-had-invisible');
+      }
+    }
+
+    container.addEventListener('click', function (event) {
+      var target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      var button = target.closest('button');
+      if (!button) {
+        return;
+      }
+
+      // Direct click behavior for small info/guide buttons.
+      var ariaLabel = String(button.getAttribute('aria-label') || '').trim().toLowerCase();
+      var title = String(button.getAttribute('title') || '').trim().toLowerCase();
+      var iconText = String(button.textContent || '').trim().toLowerCase();
+      var isGuideButton = ariaLabel.indexOf('guide') !== -1
+        || ariaLabel.indexOf('rule') !== -1
+        || ariaLabel.indexOf('tooltip') !== -1
+        || title.indexOf('guide') !== -1
+        || title.indexOf('rule') !== -1
+        || title.indexOf('tooltip') !== -1
+        || iconText === 'i';
+
+      if (isGuideButton) {
+        var panel = findSiblingTooltipPanel(button);
+        if (panel) {
+          var currentlyVisible = getComputedStyle(panel).display !== 'none' && !panel.classList.contains('hidden');
+          setPanelVisible(panel, !currentlyVisible);
+          setDebugText('guide-button:' + (currentlyVisible ? 'hide' : 'show'));
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+      }
+
+      var intent = classifyTooltipIntent(button);
+      if (!intent) {
+        return;
+      }
+
+      if (intent === 'show') {
+        showAll = true;
+      }
+      else if (intent === 'hide') {
+        showAll = false;
+      }
+      else {
+        showAll = !showAll;
+      }
+
+      setDebugText('click-intent:' + intent);
+
+      // Let React update labels first, then enforce visibility.
+      window.setTimeout(applyVisibility, 0);
+    }, true);
+
+    container.addEventListener('change', function (event) {
+      var target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+
+      var inputControl = target.closest('input, [role="switch"]');
+      if (!inputControl) {
+        return;
+      }
+
+      var intent = inferIntentFromInputControl(inputControl);
+      if (!intent) {
+        return;
+      }
+
+      if (intent === 'show') {
+        showAll = true;
+      }
+      else if (intent === 'hide') {
+        showAll = false;
+      }
+      else {
+        showAll = !showAll;
+      }
+
+      setDebugText('change-intent:' + intent);
+
+      window.setTimeout(applyVisibility, 0);
+    }, true);
+
+    var observerTarget = (document && document.body) ? document.body : container;
+    var observer = new MutationObserver(function () {
+      if (showAll) {
+        applyVisibility();
+      }
+    });
+    observer.observe(observerTarget, {
+      childList: true,
+      subtree: true,
+    });
+
+    window.addEventListener('beforeunload', function () {
+      observer.disconnect();
+    }, { once: true });
+
+    setDebugText('bridge-installed');
+  }
+
   Drupal.behaviors.cttEditorInit = {
     attach: function (context) {
       once('ctt-editor-init', '#ctt-workflow-app', context).forEach(function (container) {
@@ -5277,6 +5687,7 @@
         installInstrumentSelectionContextBridge(settings);
         installEditModeSimulatorAssignmentBridge(container, settings);
         installSpecialExecutionMode(container, settings);
+        installTooltipVisibilityBridge(container);
         enforceCanvasModeSplit(container, settings);
 
         var maxAttempts = 50;

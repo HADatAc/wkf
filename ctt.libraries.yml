@@ -1,6 +1,6 @@
 # CTT React Editor - main library bundle
 ctt-editor-app:
-  version: 1.7
+  version: 1.8
   css:
     theme:
       dist/workflow-editor.css: {}
@@ -15,7 +15,7 @@ ctt-editor-app:
 
 # CTT Editor init - Drupal behavior that bootstraps the React app
 ctt-editor-init:
-  version: 2.1
+  version: 2.2
   css:
     theme:
       css/ctt-embed-layout-v20260806.css: {}
