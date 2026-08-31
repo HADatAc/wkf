@@ -12,3 +12,10 @@ services:
     arguments:
       - '@ctt.hasco_client'
       - '@logger.factory'
+
+  ctt.wkf_metadata_extractor:
+    class: Drupal\ctt\Service\WkfMetadataExtractor
+    arguments:
+      - '@file_system'
+      - '@logger.factory'
+      - '@ctt.hasco_client'
