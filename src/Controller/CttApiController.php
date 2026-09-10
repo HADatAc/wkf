@@ -9,6 +9,7 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Drupal\ctt\Service\CttHascoClient;
 use Drupal\ctt\Service\WorkflowLayoutExporter;
+use Drupal\rep\ManageOwnerFilter;
 use Drupal\rep\Utils;
 
 /**
@@ -1046,17 +1047,89 @@ class CttApiController extends ControllerBase {
       return NULL;
     }
 
-    $ownerEmail = $this->resolveStudyOwnerEmail($normalizedStudyUri);
-    if ($ownerEmail === '') {
+    if (!\Drupal::hasService('rep.api_connector')) {
       return $this->buildStudyOwnerRequiredResponse($normalizedStudyUri, 'study_owner_unresolved');
     }
 
-    $currentUserEmail = $this->getCurrentUserEmail();
-    if ($currentUserEmail === '' || strcasecmp($ownerEmail, $currentUserEmail) !== 0) {
-      return $this->buildStudyOwnerRequiredResponse($normalizedStudyUri, 'workflow_owner_required');
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $studyObj = $api->parseObjectResponse($api->getUri($normalizedStudyUri), 'getUri');
+      if (!is_object($studyObj)) {
+        return $this->buildStudyOwnerRequiredResponse($normalizedStudyUri, 'study_owner_unresolved');
+      }
+
+      $currentUserEmail = $this->getCurrentUserEmail();
+      $isAdminUser = ManageOwnerFilter::isAdmin()
+        || $this->currentUser()->hasPermission('administer ctt')
+        || $this->currentUser()->hasPermission('administer study search');
+
+      if (!ManageOwnerFilter::isStudyOwnerOrAdmin($studyObj, $currentUserEmail, $isAdminUser)) {
+        return $this->buildStudyOwnerRequiredResponse($normalizedStudyUri, 'workflow_owner_required');
+      }
+    }
+    catch (\Throwable $ignored) {
+      return $this->buildStudyOwnerRequiredResponse($normalizedStudyUri, 'study_owner_unresolved');
     }
 
     return NULL;
+  }
+
+  /**
+   * Permit submission read/write when user can submit globally or owns study.
+   */
+  protected function enforceStudySubmissionAccess(string $studyUri): ?JsonResponse {
+    $normalizedStudyUri = trim($studyUri);
+    if ($normalizedStudyUri === '' || !$this->isUri($normalizedStudyUri)) {
+      return NULL;
+    }
+
+    if ((string) $this->currentUser()->id() === '0') {
+      return NULL;
+    }
+
+    if ($this->currentUser()->hasPermission('submit ctt workflow') || $this->currentUser()->hasPermission('administer ctt')) {
+      return NULL;
+    }
+
+    $ownerGuard = $this->enforceStudyOwnerForMutation($normalizedStudyUri);
+    if ($ownerGuard instanceof JsonResponse) {
+      return $ownerGuard;
+    }
+
+    return NULL;
+  }
+
+  /**
+   * Enforce access to R analysis flows.
+   *
+   * Users with submit/admin permissions are always allowed.
+   * Otherwise the user must be the owner/admin of the scenario study.
+   */
+  protected function enforceRAnalysisAccess(?string $studyUri): ?JsonResponse {
+    if ((string) $this->currentUser()->id() === '0') {
+      return NULL;
+    }
+
+    if ($this->currentUser()->hasPermission('submit ctt workflow') || $this->currentUser()->hasPermission('administer ctt')) {
+      return NULL;
+    }
+
+    $normalizedStudyUri = trim((string) $studyUri);
+    if ($normalizedStudyUri === '' || !$this->isUri($normalizedStudyUri)) {
+      return new JsonResponse([
+        'isValid' => FALSE,
+        'isSuccessful' => FALSE,
+        'issues' => [
+          $this->buildValidationIssue('studyUri', 'workflow_owner_required', 'Authentication required'),
+        ],
+        'summary' => [
+          'errorCount' => 1,
+          'warningCount' => 0,
+        ],
+      ], 403);
+    }
+
+    return $this->enforceStudySubmissionAccess($normalizedStudyUri);
   }
 
   /**
@@ -1775,6 +1848,12 @@ class CttApiController extends ControllerBase {
     foreach ($variants as $variantUri) {
       try {
         $processObj = $this->hascoClient->getByUri($variantUri);
+        if (is_array($processObj) && !empty($processObj['error'])) {
+          continue;
+        }
+
+        $this->cacheProcessOwnershipContext($variantUri, $processObj);
+
         $ownerEmail = $this->extractOwnerEmailFromEntity($processObj);
         if ($ownerEmail !== '') {
           $this->setCachedProcessOwnerEmail($variantUri, $ownerEmail);
@@ -1782,7 +1861,7 @@ class CttApiController extends ControllerBase {
         }
       }
       catch (\Throwable $ignored) {
-        // Try alternate URI variants.
+        // Try next process URI variant.
       }
     }
 
@@ -1790,68 +1869,9 @@ class CttApiController extends ControllerBase {
   }
 
   /**
-   * Build a consistent process-owner-required response.
-   */
-  protected function buildProcessOwnerRequiredResponse(string $processUri, string $reasonCode): JsonResponse {
-    $message = 'Only the authenticated workflow owner can modify this workflow process.';
-    if ($reasonCode === 'process_owner_unresolved') {
-      $message = 'Process owner could not be resolved. Workflow mutations are blocked for safety.';
-    }
-
-    $issue = $this->buildValidationIssue('processUri', $reasonCode, $message);
-
-    return new JsonResponse([
-      'isValid' => FALSE,
-      'updated' => FALSE,
-      'issues' => [$issue],
-      'summary' => [
-        'errorCount' => 1,
-        'warningCount' => 0,
-      ],
-      'processUri' => $processUri,
-    ], 403);
-  }
-
-  /**
-   * Enforce process owner for process-bound mutation operations.
-   */
-  protected function enforceProcessOwnerForMutation(string $processUri): ?JsonResponse {
-    $normalizedProcessUri = trim($processUri);
-    if ($normalizedProcessUri === '' || !$this->isUri($normalizedProcessUri)) {
-      return $this->buildProcessOwnerRequiredResponse($normalizedProcessUri, 'process_owner_unresolved');
-    }
-
-    // CLI/drush flows (uid 0) can exercise API contracts without user session.
-    if ((string) $this->currentUser()->id() === '0') {
-      return NULL;
-    }
-
-    $ownerIdentifier = $this->resolveProcessOwnerEmail($normalizedProcessUri);
-    if ($ownerIdentifier === '') {
-      $fallbackOwner = $this->getCurrentUserEmail();
-      $canBootstrapOwner = $this->currentUser()->hasPermission('create ctt workflow')
-        || $this->currentUser()->hasPermission('edit ctt workflow')
-        || $this->currentUser()->hasPermission('administer ctt')
-        || $this->currentUser()->hasPermission('administer site configuration');
-
-      if ($fallbackOwner !== '' && $canBootstrapOwner) {
-        $this->setCachedProcessOwnerEmail($normalizedProcessUri, $fallbackOwner);
-        $ownerIdentifier = $fallbackOwner;
-      }
-      else {
-        return $this->buildProcessOwnerRequiredResponse($normalizedProcessUri, 'process_owner_unresolved');
-      }
-    }
-
-    if (!$this->ownerIdentifierMatchesCurrentUser($ownerIdentifier)) {
-      return $this->buildProcessOwnerRequiredResponse($normalizedProcessUri, 'workflow_owner_required');
-    }
-
-    return NULL;
-  }
-
-  /**
-   * Resolve process URI from a task URI (directly or through task ancestry).
+   * Resolve and cache task parent process URI.
+   *
+   * @param array<int, string> $visitedTaskUris
    */
   protected function resolveTaskProcessUri(string $taskUri, array $visitedTaskUris = []): string {
     $normalizedTaskUri = trim($taskUri);
@@ -1863,9 +1883,8 @@ class CttApiController extends ControllerBase {
       return '';
     }
 
-    $taskProcessStateKey = $this->getTaskProcessStateKey($normalizedTaskUri);
-    $cachedProcessUri = \Drupal::state()->get($taskProcessStateKey);
-    if (is_string($cachedProcessUri) && $this->isUri(trim($cachedProcessUri))) {
+    $cachedProcessUri = \Drupal::state()->get($this->getTaskProcessStateKey($normalizedTaskUri));
+    if (is_string($cachedProcessUri) && $this->isUri($cachedProcessUri)) {
       return trim($cachedProcessUri);
     }
 
@@ -6601,6 +6620,11 @@ class CttApiController extends ControllerBase {
    * GET /workflow/api/r-analysis/autocomplete/study?q=keyword
    */
   public function rAnalysisStudyAutocomplete(Request $request) {
+    $accessGuard = $this->enforceRAnalysisAccess((string) $request->query->get('studyUri', ''));
+    if ($accessGuard instanceof JsonResponse) {
+      return $accessGuard;
+    }
+
     $results = [];
     $input = $request->query->get('q', '');
     if (!is_string($input) || trim($input) === '') {
@@ -6645,6 +6669,11 @@ class CttApiController extends ControllerBase {
    * GET /workflow/api/r-analysis/autocomplete/process?q=keyword
    */
   public function rAnalysisProcessAutocomplete(Request $request) {
+    $accessGuard = $this->enforceRAnalysisAccess((string) $request->query->get('studyUri', ''));
+    if ($accessGuard instanceof JsonResponse) {
+      return $accessGuard;
+    }
+
     $results = [];
     $input = $request->query->get('q', '');
     if (!is_string($input) || trim($input) === '') {
@@ -6777,6 +6806,11 @@ class CttApiController extends ControllerBase {
     }
 
     $studyUri = trim((string) ($payload['studyUri'] ?? ($query['studyUri'] ?? '')));
+    $accessGuard = $this->enforceRAnalysisAccess($studyUri);
+    if ($accessGuard instanceof JsonResponse) {
+      return $accessGuard;
+    }
+
     $processUri = trim((string) ($payload['processUri'] ?? ($query['processUri'] ?? '')));
     $toolUri = trim((string) ($payload['toolUri'] ?? ($query['toolUri'] ?? '')));
     $entrypoint = trim((string) ($payload['entrypoint'] ?? ($query['entrypoint'] ?? '')));
@@ -7122,6 +7156,11 @@ class CttApiController extends ControllerBase {
 
     $query = $request->query->all();
     $studyUri = trim((string) ($payload['studyUri'] ?? ($query['studyUri'] ?? '')));
+    $accessGuard = $this->enforceRAnalysisAccess($studyUri);
+    if ($accessGuard instanceof JsonResponse) {
+      return $accessGuard;
+    }
+
     $processUri = trim((string) ($payload['processUri'] ?? ($query['processUri'] ?? '')));
     $toolUri = trim((string) ($payload['toolUri'] ?? ($query['toolUri'] ?? '')));
     $runId = trim((string) ($payload['runId'] ?? ($query['runId'] ?? '')));
@@ -7690,6 +7729,11 @@ class CttApiController extends ControllerBase {
       ], 400);
     }
 
+    $accessGuard = $this->enforceStudySubmissionAccess($studyUri);
+    if ($accessGuard instanceof JsonResponse) {
+      return $accessGuard;
+    }
+
     $processUri = trim((string) ($payload['processUri'] ?? $request->query->get('processUri', '')));
     $storedAssociations = $this->loadStudyAssociations($studyUri);
 
@@ -7790,6 +7834,11 @@ class CttApiController extends ControllerBase {
           $this->buildValidationIssue('studyUri', 'missing_or_invalid_study_uri', 'A valid study URI is required.'),
         ],
       ], 400);
+    }
+
+    $accessGuard = $this->enforceStudySubmissionAccess($studyUri);
+    if ($accessGuard instanceof JsonResponse) {
+      return $accessGuard;
     }
 
     $states = $this->getEditorialStates();
@@ -8021,6 +8070,13 @@ class CttApiController extends ControllerBase {
       $mode = 'submission';
     }
 
+    if ($this->isUri($studyUri)) {
+      $accessGuard = $this->enforceStudySubmissionAccess($studyUri);
+      if ($accessGuard instanceof JsonResponse) {
+        return $accessGuard;
+      }
+    }
+
     if ($mode !== 'create') {
       $ownerGuard = $this->enforceStudyOwnerForMutation($studyUri);
       if ($ownerGuard instanceof JsonResponse) {
@@ -8179,6 +8235,11 @@ class CttApiController extends ControllerBase {
    * Proxy arbitrary hascoapi calls from frontend through Drupal (same-origin).
    */
   public function proxyHasco(Request $request, $proxy_path = '') {
+    $method = strtoupper($request->getMethod());
+    if (!in_array($method, ['GET', 'HEAD'], TRUE) && !$this->currentUser()->hasPermission('access ctt editor')) {
+      return new JsonResponse(['error' => 'Authentication required'], 403);
+    }
+
     $proxy_path = is_string($proxy_path) ? $proxy_path : '';
 
     // Primary: path-param route (/workflow/hascoapi/api/{proxy_path})
@@ -8216,7 +8277,7 @@ class CttApiController extends ControllerBase {
     }
 
     try {
-      $result = $this->hascoClient->proxyRequest($request->getMethod(), $endpoint, $options);
+      $result = $this->hascoClient->proxyRequest($method, $endpoint, $options);
       return new JsonResponse($result);
     }
     catch (\Exception $e) {

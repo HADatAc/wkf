@@ -10,6 +10,7 @@ use Drupal\Core\Url;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Drupal\Component\Utility\Html;
 use Drupal\Core\Render\Markup;
+use Drupal\rep\ManageOwnerFilter;
 
 /**
  * Controller that renders the CTT Workflow Editor page.
@@ -1314,6 +1315,47 @@ class CttEditorController extends ControllerBase {
   }
 
   /**
+   * Determine whether current user can execute study simulations.
+   */
+  protected function canCurrentUserExecuteStudySimulation(string $studyUri): bool {
+    if ($studyUri === '' || !$this->isUri($studyUri)) {
+      return FALSE;
+    }
+
+    $account = $this->currentUser;
+    if (!$account || $account->isAnonymous()) {
+      return FALSE;
+    }
+
+    if ($account->hasPermission('submit ctt workflow') || $account->hasPermission('administer ctt')) {
+      return TRUE;
+    }
+
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return FALSE;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $studyObj = $api->parseObjectResponse($api->getUri($studyUri), 'getUri');
+      if (!is_object($studyObj)) {
+        return FALSE;
+      }
+
+      $email = '';
+      $user = \Drupal\user\Entity\User::load((int) $account->id());
+      if ($user && is_string($user->getEmail())) {
+        $email = trim((string) $user->getEmail());
+      }
+      $isAdminUser = ManageOwnerFilter::isAdmin() || $account->hasPermission('administer study search');
+      return ManageOwnerFilter::isStudyOwnerOrAdmin($studyObj, $email, $isAdminUser);
+    }
+    catch (\Throwable $ignored) {
+      return FALSE;
+    }
+  }
+
+  /**
    * Build effective workflow access context for study-linked editor views.
    */
   protected function buildWorkflowAccessContext(?string $studyUri, string $currentUserEmail, bool $isExecutionMode): array {
@@ -1329,9 +1371,7 @@ class CttEditorController extends ControllerBase {
     if ($isStudyContext) {
       $ownerEmail = $this->resolveStudyManagerEmail($normalizedStudyUri);
       $hasResolvedStudyOwner = $ownerEmail !== '';
-      $isWorkflowOwnerAuthenticated = $hasResolvedStudyOwner
-        && $normalizedCurrentUserEmail !== ''
-        && strcasecmp($ownerEmail, $normalizedCurrentUserEmail) === 0;
+      $isWorkflowOwnerAuthenticated = $this->canCurrentUserExecuteStudySimulation($normalizedStudyUri);
 
       if (!$isWorkflowOwnerAuthenticated) {
         $reasonCode = $hasResolvedStudyOwner ? 'non_owner_study_context' : 'study_owner_unresolved';
@@ -1406,6 +1446,13 @@ class CttEditorController extends ControllerBase {
     if (!is_string($decodedStudyUri) || trim($decodedStudyUri) === '') {
       $this->messenger()->addError($this->t('Invalid study identifier for structured submission.'));
       return $this->redirect('std.search_studies_variables');
+    }
+
+    if (!$this->canCurrentUserExecuteStudySimulation(trim($decodedStudyUri))) {
+      $this->messenger()->addError($this->t('You are not allowed to execute simulations for this scenario.'));
+      return $this->redirect('std.manage_study_elements', [
+        'studyuri' => base64_encode(trim($decodedStudyUri)),
+      ]);
     }
 
     $processUri = NULL;
@@ -2009,6 +2056,10 @@ class CttEditorController extends ControllerBase {
     $initialProcessName = trim((string) \Drupal::request()->query->get('processName', ''));
     $initialToolUri = trim((string) \Drupal::request()->query->get('toolUri', ''));
 
+    if ($initialStudyUri !== '' && !$this->canCurrentUserExecuteStudySimulation($initialStudyUri)) {
+      throw new \Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException('Authentication required');
+    }
+
     $initialStudyLabel = $initialScenarioName;
     if ($initialStudyLabel === '' && $this->isUri($initialStudyUri)) {
       $initialStudyLabel = $this->resolveLabelByUri($initialStudyUri);
@@ -2281,7 +2332,9 @@ class CttEditorController extends ControllerBase {
     $permissionMatrix = [
       'canCreateWorkflow' => $canAdminister || $account->hasPermission('create ctt workflow'),
       'canEditWorkflow' => $canAdminister || $account->hasPermission('edit ctt workflow'),
-      'canSubmitWorkflow' => $canAdminister || $account->hasPermission('submit ctt workflow'),
+      'canSubmitWorkflow' => $canAdminister
+        || $account->hasPermission('submit ctt workflow')
+        || (!empty($workflowAccess['isStudyContext']) && !empty($workflowAccess['isWorkflowOwnerAuthenticated'])),
       'canAdminister' => $canAdminister,
     ];
 

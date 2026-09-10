@@ -7,6 +7,7 @@ use Drupal\Core\File\FileSystemInterface;
 use Drupal\file\FileInterface;
 use Drupal\file\Entity\File;
 use Drupal\rep\Constant;
+use Drupal\rep\ManageOwnerFilter;
 use Drupal\rep\Utils;
 use Drupal\rep\Vocabulary\HASCO;
 use Drupal\Core\Url;
@@ -1019,6 +1020,48 @@ class CttExecutionController extends ControllerBase {
     ]);
   }
 
+  /**
+   * Determine whether current user can execute simulations for the study.
+   */
+  protected function canCurrentUserExecuteStudySimulation(string $studyUri): bool {
+    if ($studyUri === '' || !static::isUri($studyUri)) {
+      return FALSE;
+    }
+
+    $account = $this->currentUser();
+    if (!$account || $account->isAnonymous()) {
+      return FALSE;
+    }
+
+    if ($account->hasPermission('submit ctt workflow') || $account->hasPermission('administer ctt')) {
+      return TRUE;
+    }
+
+    if (!\Drupal::hasService('rep.api_connector')) {
+      return FALSE;
+    }
+
+    try {
+      $api = \Drupal::service('rep.api_connector');
+      $studyObj = $api->parseObjectResponse($api->getUri($studyUri), 'getUri');
+      if (!is_object($studyObj)) {
+        return FALSE;
+      }
+
+      $email = '';
+      $user = \Drupal\user\Entity\User::load((int) $account->id());
+      if ($user && is_string($user->getEmail())) {
+        $email = trim((string) $user->getEmail());
+      }
+
+      $isAdminUser = ManageOwnerFilter::isAdmin() || $account->hasPermission('administer study search');
+      return ManageOwnerFilter::isStudyOwnerOrAdmin($studyObj, $email, $isAdminUser);
+    }
+    catch (\Throwable $ignored) {
+      return FALSE;
+    }
+  }
+
   public function createExecution(string $studyuri) {
     $decodedStudyUri = base64_decode($studyuri, TRUE);
     if (empty($decodedStudyUri)) {
@@ -1026,23 +1069,8 @@ class CttExecutionController extends ControllerBase {
       return $this->redirect('std.search_studies_variables');
     }
 
-    // Security rule: only the study owner/manager can create executions.
-    $currentUserEmail = trim((string) $this->currentUser()->getEmail());
-    if ($currentUserEmail === '') {
-      return $this->redirectToManageStudyWithError($studyuri, 'You do not have permission to create executions for this study.');
-    }
-
-    try {
-      $api = \Drupal::service('rep.api_connector');
-      $studyObj = $api->parseObjectResponse($api->getUri($decodedStudyUri), 'getUri');
-      $ownerEmail = is_object($studyObj) ? trim((string) ($studyObj->hasSIRManagerEmail ?? '')) : '';
-
-      if ($ownerEmail === '' || strcasecmp($ownerEmail, $currentUserEmail) !== 0) {
-        return $this->redirectToManageStudyWithError($studyuri, 'You are not allowed to create executions for this study.');
-      }
-    }
-    catch (\Throwable $e) {
-      return $this->redirectToManageStudyWithError($studyuri, 'Unable to validate permission to create this execution.');
+    if (!$this->canCurrentUserExecuteStudySimulation(trim((string) $decodedStudyUri))) {
+      return $this->redirectToManageStudyWithError($studyuri, 'You are not allowed to create executions for this study.');
     }
 
     // Reset the stored association for this study (useful for testing).
@@ -1227,6 +1255,14 @@ class CttExecutionController extends ControllerBase {
       }
     }
 
+    $accessStudyUri = trim((string) ($ctx['studyUri'] ?? ($payload['studyUri'] ?? '')));
+    if (!static::isUri($accessStudyUri)) {
+      return new JsonResponse(['ok' => FALSE, 'error' => 'Missing/invalid parameter: studyUri'], 400);
+    }
+    if (!$this->canCurrentUserExecuteStudySimulation($accessStudyUri)) {
+      return new JsonResponse(['ok' => FALSE, 'error' => 'Access denied.'], 403);
+    }
+
     $fid = (int) ($ctx['fileId'] ?? 0);
     $dataFileUri = trim((string) ($ctx['dataFileUri'] ?? ''));
     $filename = trim((string) ($ctx['filename'] ?? ''));
@@ -1367,6 +1403,10 @@ class CttExecutionController extends ControllerBase {
       $processUri = '';
     }
 
+    if (!$this->canCurrentUserExecuteStudySimulation($studyUri)) {
+      return new JsonResponse(['ok' => FALSE, 'error' => 'Access denied.'], 403);
+    }
+
     $history = $this->loadProcessExecutionHistory($studyUri);
     if (empty($history)) {
       return new JsonResponse(['ok' => TRUE, 'interrupted' => FALSE, 'reason' => 'No history entries found.']);
@@ -1465,6 +1505,11 @@ class CttExecutionController extends ControllerBase {
       return new Response('Execution context not found.', 404);
     }
 
+    $studyUri = trim((string) ($ctx['studyUri'] ?? ''));
+    if (!static::isUri($studyUri) || !$this->canCurrentUserExecuteStudySimulation($studyUri)) {
+      return new Response('Access denied.', 403);
+    }
+
     $fid = (int) ($ctx['fileId'] ?? 0);
     $filename = trim((string) ($ctx['filename'] ?? ''));
     if ($fid <= 0) {
@@ -1502,6 +1547,13 @@ class CttExecutionController extends ControllerBase {
     if ($studyUri === '' || $runId === '') {
       $this->messenger()->addError($this->t('Unable to delete execution: missing study or run identifier.'));
       return $this->redirect('std.search_studies_variables');
+    }
+
+    if (!$this->canCurrentUserExecuteStudySimulation($studyUri)) {
+      $this->messenger()->addError($this->t('You are not allowed to delete executions for this scenario.'));
+      return $this->redirect('std.manage_study_elements', [
+        'studyuri' => base64_encode($studyUri),
+      ]);
     }
 
     $removed = 0;
@@ -1596,6 +1648,10 @@ class CttExecutionController extends ControllerBase {
     $decodedStudyUri = base64_decode($studyuri);
     if (empty($decodedStudyUri)) {
       return new Response('Invalid study URI.', 400);
+    }
+
+    if (!$this->canCurrentUserExecuteStudySimulation(trim((string) $decodedStudyUri))) {
+      return new Response('Access denied.', 403);
     }
 
     $processUri = NULL;
